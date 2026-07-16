@@ -169,3 +169,35 @@ def test_profile_mcp_write_skips_dangerous_entry(tmp_path):
         reset_hermes_home_override(token)
     assert "evil" not in config.get("mcp_servers", {})
     assert "clean" in config.get("mcp_servers", {})
+
+
+def test_validator_rejects_forward_jwt_on_stdio_server():
+    from hermes_cli.mcp_security import validate_mcp_server_entry
+
+    issues = validate_mcp_server_entry("stdio_srv", {
+        "command": "npx",
+        "args": ["-y", "some-mcp-server"],
+        "auth": "forward_jwt",
+    })
+    assert issues
+    assert any("forward_jwt" in issue and "url" in issue for issue in issues)
+
+
+def test_validator_allows_forward_jwt_on_http_server():
+    from hermes_cli.mcp_security import validate_mcp_server_entry
+
+    issues = validate_mcp_server_entry("http_srv", {
+        "url": "https://example.com/mcp",
+        "auth": "forward_jwt",
+    })
+    assert issues == []
+
+
+def test_validator_rejects_forward_jwt_without_auth_field_change():
+    """A server with no 'auth' field at all is unaffected (regression guard)."""
+    from hermes_cli.mcp_security import validate_mcp_server_entry
+
+    issues = validate_mcp_server_entry("plain_srv", {
+        "url": "https://example.com/mcp",
+    })
+    assert issues == []

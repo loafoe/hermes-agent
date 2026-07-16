@@ -134,6 +134,7 @@ def validate_mcp_server_entry(name: str, entry: dict[str, Any]) -> list[str]:
         return []
 
     issues: list[str] = []
+    issues.extend(_validate_forward_jwt_auth(name, entry))
 
     # 1. Hardcoded IOC blocklist — applies regardless of command shape.
     flat = _entry_text(entry)
@@ -174,6 +175,26 @@ def validate_mcp_server_entry(name: str, entry: dict[str, Any]) -> list[str]:
             f"MCP server"
         )
 
+    return issues
+
+
+def _validate_forward_jwt_auth(name: str, entry: dict[str, Any]) -> list[str]:
+    """Reject 'auth: forward_jwt' on entries that can't carry HTTP headers.
+
+    forward_jwt injects an Authorization header into an HTTP/SSE MCP
+    transport (see tools/mcp_tool.py's MCPServerTask._auth_type). A stdio
+    server has no HTTP request to attach a header to, so this is always a
+    config mistake, not a legitimate use case.
+    """
+    if entry.get("auth") != "forward_jwt":
+        return []
+    issues: list[str] = []
+    if not entry.get("url"):
+        issues.append(
+            f"MCP server '{name}' sets auth: forward_jwt but has no 'url' — "
+            f"forward_jwt only applies to HTTP/SSE transports, not stdio "
+            f"('command') servers"
+        )
     return issues
 
 
