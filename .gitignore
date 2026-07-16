@@ -325,3 +325,6 @@ native/fts5_cjk/*.so
 /pm/.lock.json.lock
 
 apps/desktop/.dist-build*
+
+# Local git worktrees for isolated feature work (superpowers:using-git-worktrees)
+.worktrees/
