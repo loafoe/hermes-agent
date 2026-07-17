@@ -21,6 +21,8 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Set
 
+import httpx
+
 logger = logging.getLogger(__name__)
 
 from tools.mcp_tool_common import _DEFAULT_TOOL_TIMEOUT, mcp_field
@@ -303,6 +305,34 @@ async def _paginate_full_list(list_method, items_attr: str, server_name: str,
 
 # ---- Server task -- each MCP server lives in one long-lived asyncio Task ----
 
+class _ForwardedJWTAuth(httpx.Auth):
+    """Injects a per-request Bearer token forwarded from the API-server caller.
+
+    Structurally parallel to HermesMCPOAuthProvider
+    (tools/mcp_oauth_manager.py) but far simpler: no token refresh, no 401
+    recovery — the JWT is opaque cargo owned by the caller, not a
+    credential hermes-agent manages. Only ``auth: forward_jwt`` MCP
+    servers install this (tools/mcp_tool.py's ``_run_http``); it forwards
+    whatever the caller supplied via ``X-MCP-Authorization`` on the
+    inbound API-server request, unvalidated.
+
+    httpx.Auth.auth_flow is a plain (non-async) generator; httpx accepts a
+    sync auth_flow transparently even on an async client (unlike
+    HermesMCPOAuthProvider, which overrides async_auth_flow specifically
+    to bridge the MCP SDK's bidirectional 401-retry protocol — not needed
+    here since this class never inspects the response).
+    """
+
+    def __init__(self, server: "MCPServerTask"):
+        self._server = server
+
+    def auth_flow(self, request):
+        jwt = getattr(self._server, "_pending_mcp_jwt", None)
+        if jwt:
+            request.headers["Authorization"] = f"Bearer {jwt}"
+        yield request
+
+
 class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthMixin):
     """One MCP server connection in one long-lived asyncio Task (the transport's anyio cancel
     scopes must enter/exit in the same Task). Run state machine, transport bring-up and
@@ -312,6 +342,7 @@ class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthM
         "name", "session", "tool_timeout", "_task", "_ready", "_shutdown_event", "_reconnect_event",
         "_tools", "_error", "_config", "_sampling", "_elicitation", "_registered_tool_names",
         "_auth_type", "_refresh_lock", "_rpc_lock", "_pending_refresh_tasks", "_pending_call_context",
+        "_pending_mcp_jwt",
         "_lifecycle_started_at", "_last_tool_call_at", "_idle_timeout_seconds", "_max_lifetime_seconds",
         "_recycled_reason", "initialize_result", "_ping_unsupported", "_list_cache_meta",
         "_reconnect_retries", "_session_proven", "_was_parked", "_inflight_tasks", "_reconnecting",
@@ -377,6 +408,12 @@ class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthM
         # contextvars snapshot inside session.call_tool(): the SDK runs elicitation/create on a
         # task that does not inherit HERMES_SESSION_PLATFORM, so the callback replays this.
         self._pending_call_context: Optional[contextvars.Context] = None
+        # JWT forwarded from the API-server caller (X-MCP-Authorization),
+        # snapshotted immediately before scheduling a tool call onto the MCP
+        # background loop — same cross-thread bridge pattern as
+        # _pending_call_context above, since httpx.Auth.auth_flow runs on
+        # that same background loop, not the caller's thread/context.
+        self._pending_mcp_jwt: Optional[str] = None
         self._lifecycle_started_at = self._last_tool_call_at = time.monotonic()
         self._idle_timeout_seconds = self._max_lifetime_seconds = self._recycled_reason = None
         # Handshake InitializeResult: the server's REAL advertised capabilities.
