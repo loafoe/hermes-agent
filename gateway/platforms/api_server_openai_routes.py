@@ -681,6 +681,7 @@ class OpenAICompatRoutesMixin:
         gateway_session_key, key_err = self._parse_session_key_header(request)
         if key_err is not None:
             return key_err
+        forwarded_mcp_jwt = self._extract_forwarded_mcp_jwt(request)
         # X-Hermes-Session-Id continues an existing session (history from state.db, not the body);
         # requires a configured API key or any client could read history by guessing ids.
         provided_session_id = request.headers.get("X-Hermes-Session-Id", "").strip()
@@ -730,7 +731,8 @@ class OpenAICompatRoutesMixin:
         run_kwargs = dict(
             user_message=user_message, conversation_history=history,
             ephemeral_system_prompt=system_prompt, session_id=session_id,
-            gateway_session_key=gateway_session_key, **agent_overrides, route=route,
+            gateway_session_key=gateway_session_key, forwarded_mcp_jwt=forwarded_mcp_jwt,
+            **agent_overrides, route=route,
             relay_metadata=relay_metadata,
             # #98619: only an explicitly provided X-Hermes-Session-Id is wake-capable (the
             # header is 403-gated on API_SERVER_KEY, so the wake self-post can authenticate
@@ -1045,6 +1047,7 @@ class OpenAICompatRoutesMixin:
         gateway_session_key, key_err = self._parse_session_key_header(request)
         if key_err is not None:
             return key_err
+        forwarded_mcp_jwt = self._extract_forwarded_mcp_jwt(request)
         try:
             body = await request.json()
         except Exception:
@@ -1135,7 +1138,7 @@ class OpenAICompatRoutesMixin:
             user_message=user_message, conversation_history=conversation_history,
             ephemeral_system_prompt=instructions, session_id=session_id,
             gateway_session_key=gateway_session_key, bind_declared_conversation=_declared_selected,
-            **agent_overrides, route=route, relay_metadata=relay_metadata)
+            forwarded_mcp_jwt=forwarded_mcp_jwt, **agent_overrides, route=route, relay_metadata=relay_metadata)
         if stream:
             _stream_q = ThreadSafeAsyncQueue()
 

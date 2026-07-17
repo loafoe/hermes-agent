@@ -500,6 +500,7 @@ class _RunLaunch:
     request_profile: Any
     browser_control_principal: Any
     browser_control_transport_family: Any
+    mcp_jwt: str
     turn_author: Optional[Dict[str, Any]] = None  # memory-attribution label only; grants nothing
 
     @property
@@ -624,6 +625,7 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
     gateway_session_key, key_err = self._parse_session_key_header(request)
     if key_err is not None:
         return key_err
+    forwarded_mcp_jwt = self._extract_forwarded_mcp_jwt(request)
     try:
         body = await request.json()
     except Exception:
@@ -738,7 +740,7 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         request_profile=_api_server._api_request_profile.get(),
         browser_control_principal=_api_server._api_request_browser_control_principal.get(),
         browser_control_transport_family=_api_server._api_request_browser_control_transport_family.get(),
-        turn_author=turn_author)
+        turn_author=turn_author, mcp_jwt=forwarded_mcp_jwt or "")
     self._activate_admitted_request()
     # A canonical Bot Chat that a Desktop holds live is that Desktop's to run: executing here would
     # be a second writer beside its lease (#114959). The owner's mailbox takes the turn and its
@@ -815,7 +817,7 @@ def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_serve
                 # so it stays default-denied until a merge contract exists for that chain;
                 # likewise a caller-supplied conversation_history is authoritative for the
                 # turn and never reads the delivery row, so it is denied the same way.
-                session_history_delivery="1" if run.session_history_delivery else "")
+                session_history_delivery="1" if run.session_history_delivery else "", mcp_jwt=run.mcp_jwt)
             if session_tokens:
                 resets.append((session_tokens, clear_session_vars))
             if run.agent_kwargs["room_dispatch"] is not None:
