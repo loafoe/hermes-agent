@@ -254,6 +254,49 @@ class TestAuth:
         assert result.status == 401
 
 
+class TestForwardedMCPJWT:
+    def test_extract_returns_none_when_header_absent(self):
+        config = PlatformConfig(enabled=True)
+        adapter = APIServerAdapter(config)
+        mock_request = MagicMock()
+        mock_request.headers = {}
+        assert adapter._extract_forwarded_mcp_jwt(mock_request) is None
+
+    def test_extract_strips_bearer_prefix(self):
+        config = PlatformConfig(enabled=True)
+        adapter = APIServerAdapter(config)
+        mock_request = MagicMock()
+        mock_request.headers = {"X-MCP-Authorization": "Bearer eyJ.example.jwt"}
+        assert adapter._extract_forwarded_mcp_jwt(mock_request) == "eyJ.example.jwt"
+
+    def test_extract_accepts_raw_token_without_bearer_prefix(self):
+        config = PlatformConfig(enabled=True)
+        adapter = APIServerAdapter(config)
+        mock_request = MagicMock()
+        mock_request.headers = {"X-MCP-Authorization": "eyJ.example.jwt"}
+        assert adapter._extract_forwarded_mcp_jwt(mock_request) == "eyJ.example.jwt"
+
+    def test_extract_rejects_control_characters(self):
+        config = PlatformConfig(enabled=True)
+        adapter = APIServerAdapter(config)
+        mock_request = MagicMock()
+        mock_request.headers = {"X-MCP-Authorization": "Bearer bad\r\ntoken"}
+        assert adapter._extract_forwarded_mcp_jwt(mock_request) is None
+
+    def test_extract_is_independent_of_check_auth(self):
+        """X-MCP-Authorization is captured regardless of the gateway's own
+        API-key auth outcome — _check_auth is a separate, unmodified gate."""
+        config = PlatformConfig(enabled=True, extra={"key": "sk-test123"})
+        adapter = APIServerAdapter(config)
+        mock_request = MagicMock()
+        mock_request.headers = {
+            "Authorization": "Bearer wrong-key",
+            "X-MCP-Authorization": "Bearer forwarded-jwt",
+        }
+        assert adapter._check_auth(mock_request) is not None  # still rejected
+        assert adapter._extract_forwarded_mcp_jwt(mock_request) == "forwarded-jwt"  # still captured
+
+
 # ---------------------------------------------------------------------------
 # Concurrency cap (gateway.api_server.max_concurrent_runs) — #7483
 # ---------------------------------------------------------------------------
