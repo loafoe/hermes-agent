@@ -3494,6 +3494,14 @@ class MCPServerTask:
                 logger.warning("MCP OAuth setup failed for '%s': %s", self.name, exc)
                 raise
 
+        # Forward the API-server caller's JWT (X-MCP-Authorization) into
+        # every outgoing request on this connection. Mutually exclusive
+        # with OAuth — config-load validation (hermes_cli/mcp_security.py)
+        # already rejects entries that set both.
+        _forward_jwt_auth = None
+        if self._auth_type == "forward_jwt":
+            _forward_jwt_auth = _ForwardedJWTAuth(self)
+
         sampling_kwargs = self._sampling.session_kwargs() if self._sampling else {}
         if self._elicitation:
             sampling_kwargs.update(self._elicitation.session_kwargs())
@@ -3539,6 +3547,8 @@ class MCPServerTask:
                 # behind OAuth 2.1 PKCE work. Previously built but never
                 # forwarded — SSE OAuth would silently fail with 401s.
                 _sse_kwargs["auth"] = _oauth_auth
+            elif _forward_jwt_auth is not None:
+                _sse_kwargs["auth"] = _forward_jwt_auth
             if client_cert is not None or ssl_verify is not True:
                 # SSE transport doesn't expose verify/cert as kwargs, so route
                 # them through an httpx_client_factory that wraps the SDK's
@@ -3631,6 +3641,8 @@ class MCPServerTask:
                 client_kwargs["headers"] = headers
             if _oauth_auth is not None:
                 client_kwargs["auth"] = _oauth_auth
+            elif _forward_jwt_auth is not None:
+                client_kwargs["auth"] = _forward_jwt_auth
             if client_cert is not None:
                 client_kwargs["cert"] = client_cert
 
@@ -3687,6 +3699,8 @@ class MCPServerTask:
             }
             if _oauth_auth is not None:
                 _http_kwargs["auth"] = _oauth_auth
+            elif _forward_jwt_auth is not None:
+                _http_kwargs["auth"] = _forward_jwt_auth
             try:
                 async with streamablehttp_client(url, **_http_kwargs) as (
                     read_stream, write_stream, _get_session_id,

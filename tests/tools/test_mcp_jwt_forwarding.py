@@ -170,3 +170,122 @@ def test_make_tool_handler_pending_mcp_jwt_none_when_not_bound(monkeypatch, tmp_
         mcp_tool._server_error_counts.pop("srv", None)
 
     assert observed["pending_mcp_jwt"] is None
+
+
+def test_run_http_new_http_path_installs_forwarded_jwt_auth(tmp_path):
+    """auth: forward_jwt on the new-HTTP (_MCP_NEW_HTTP) path installs a
+    _ForwardedJWTAuth bound to this server as the auth= kwarg, the same
+    slot _oauth_auth uses today."""
+    import asyncio
+    from unittest.mock import MagicMock, patch
+
+    from tools.mcp_tool import MCPServerTask, _ForwardedJWTAuth
+
+    server = MCPServerTask("remote")
+    server._auth_type = "forward_jwt"
+    captured: dict = {}
+
+    class DummyAsyncClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class DummyTransportCtx:
+        async def __aenter__(self):
+            return MagicMock(), MagicMock(), (lambda: None)
+
+        async def __aexit__(self, *a):
+            return False
+
+    class DummySession:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def initialize(self):
+            return None
+
+    async def _discover_tools(self):
+        self._shutdown_event.set()
+
+    async def _drive():
+        with patch("tools.mcp_tool._MCP_HTTP_AVAILABLE", True), \
+             patch("tools.mcp_tool._MCP_NEW_HTTP", True), \
+             patch("httpx.AsyncClient", DummyAsyncClient), \
+             patch("tools.mcp_tool.streamable_http_client",
+                   return_value=DummyTransportCtx()), \
+             patch("tools.mcp_tool.ClientSession", DummySession), \
+             patch.object(MCPServerTask, "_discover_tools", _discover_tools):
+            await server._run_http({"url": "https://example.com/mcp"})
+
+    asyncio.run(_drive())
+    assert isinstance(captured.get("auth"), _ForwardedJWTAuth)
+    assert captured["auth"]._server is server
+
+
+def test_run_http_oauth_and_forward_jwt_both_absent_by_default(tmp_path):
+    """A plain server (no auth field) installs neither auth= kwarg."""
+    import asyncio
+    from unittest.mock import MagicMock, patch
+
+    from tools.mcp_tool import MCPServerTask
+
+    server = MCPServerTask("remote")
+    server._auth_type = ""
+    captured: dict = {}
+
+    class DummyAsyncClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class DummyTransportCtx:
+        async def __aenter__(self):
+            return MagicMock(), MagicMock(), (lambda: None)
+
+        async def __aexit__(self, *a):
+            return False
+
+    class DummySession:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def initialize(self):
+            return None
+
+    async def _discover_tools(self):
+        self._shutdown_event.set()
+
+    async def _drive():
+        with patch("tools.mcp_tool._MCP_HTTP_AVAILABLE", True), \
+             patch("tools.mcp_tool._MCP_NEW_HTTP", True), \
+             patch("httpx.AsyncClient", DummyAsyncClient), \
+             patch("tools.mcp_tool.streamable_http_client",
+                   return_value=DummyTransportCtx()), \
+             patch("tools.mcp_tool.ClientSession", DummySession), \
+             patch.object(MCPServerTask, "_discover_tools", _discover_tools):
+            await server._run_http({"url": "https://example.com/mcp"})
+
+    asyncio.run(_drive())
+    assert "auth" not in captured
