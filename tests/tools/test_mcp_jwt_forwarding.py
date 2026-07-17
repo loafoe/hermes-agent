@@ -9,7 +9,6 @@ httpx.Auth seam HermesMCPOAuthProvider already uses for OAuth.
 """
 
 import httpx
-import pytest
 
 
 def test_pending_mcp_jwt_defaults_to_none():
