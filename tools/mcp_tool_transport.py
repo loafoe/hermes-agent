@@ -382,6 +382,15 @@ class MCPServerTransportMixin:
             logger.warning("MCP OAuth setup failed for '%s': %s", self.name, exc)
             raise
 
+    def _build_forward_jwt_auth(self):
+        """Forward the API-server caller's JWT (X-MCP-Authorization) into every outgoing
+        request on this connection. Mutually exclusive with OAuth — config-load validation
+        (hermes_cli/mcp_security.py) already rejects entries that set both."""
+        if self._auth_type != "forward_jwt":
+            return None
+        from tools.mcp_tool import _ForwardedJWTAuth
+        return _ForwardedJWTAuth(self)
+
     def _sse_transport(self, url: str, headers: dict, connect_timeout: float,
                        ssl_verify, client_cert, oauth_auth, strict_cfg_headers: bool):
         """``sse_client`` context manager for ``transport: sse`` entries."""
@@ -465,7 +474,8 @@ class MCPServerTransportMixin:
             headers["mcp-protocol-version"] = _core.LATEST_HANDSHAKE_VERSION
         connect_timeout = config.get("connect_timeout", _core._DEFAULT_CONNECT_TIMEOUT)
         common = (url, headers, connect_timeout, config.get("ssl_verify", True), _resolve_client_cert(self.name, config),
-                  self._build_oauth_auth(url, config), bool(config.get("strict_redirect_headers")))
+                  self._build_oauth_auth(url, config) or self._build_forward_jwt_auth(),
+                  bool(config.get("strict_redirect_headers")))
         if config.get("transport") == "sse":
             return await self._serve_transport(self._sse_transport(*common), "SSE", float(connect_timeout))
         if self._sse_fallback:
