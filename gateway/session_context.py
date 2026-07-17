@@ -8,7 +8,7 @@ other's routing ids.  ``get_session_env`` is a drop-in for ``os.getenv``.
 import os
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any, Iterator
+from typing import Any, Iterator, Optional
 
 # "Never set here" (falls back to os.environ for CLI/cron) vs "" = explicitly cleared (no fallback).
 _UNSET: Any = object()
@@ -64,6 +64,35 @@ _VAR_MAP = {var.name: var for var in (
     _CRON_AUTO_DELIVER_THREAD_ID,
 )}
 
+# JWT forwarded from an API-server caller's X-MCP-Authorization header, to
+# be injected into outgoing MCP tool calls for servers configured with
+# auth: forward_jwt (see tools/mcp_tool.py's _ForwardedJWTAuth). Unlike
+# every other var in _VAR_MAP, this one is read via get_session_mcp_jwt(),
+# NOT get_session_env() — it must never fall back to os.environ, since a
+# stale process-global env var leaking a JWT across concurrent sessions
+# would be a credential-confusion bug, not just a routing bug.
+_SESSION_MCP_JWT: ContextVar = ContextVar("HERMES_SESSION_MCP_JWT", default=_UNSET)
+
+# Whether the current session's delivery channel can route an ASYNC completion
+# back to the agent AFTER the current turn ends (i.e. wake a fresh turn).
+#
+# True  — long-lived CLI sessions (in-process completion_queue drain) and the
+#         real gateway platforms (Telegram/Discord/Slack/...), which hold a
+#         persistent outbound channel and run the watcher/drain loops.
+# False — finite runtimes that can end before a detached completion returns:
+#         stateless API-server requests and dispatcher-spawned Kanban workers.
+#
+# Tools that promise async delivery (terminal notify_on_complete /
+# watch_patterns, delegate_task background=True) read this via
+# ``async_delivery_supported()`` and refuse to hand out a promise the channel
+# can't keep — turning a silent no-op into an explicit contract.
+#
+# Default _UNSET => treated as supported, so CLI (which never sets a platform)
+# and any contextvar-unaware path keep working. Stateless adapters opt OUT by
+# setting ``supports_async_delivery = False`` on the adapter class; the gateway
+# propagates that into this contextvar at session-bind time.
+_SESSION_ASYNC_DELIVERY: ContextVar = ContextVar("HERMES_SESSION_ASYNC_DELIVERY", default=_UNSET)
+
 
 def _runtime_cwd(func: str, *args: Any) -> None:
     """Best-effort call of ``agent.runtime_cwd.<func>``; import/runtime failures are ignored."""
@@ -115,6 +144,7 @@ def set_session_vars(
     message_id: str = "", profile: str = "", browser_control_principal: str = "",
     browser_control_transport_family: str = "", cwd: str = "", async_delivery: bool = True,
     ui_session_id: str = "", cron_session: Any = _UNSET, parent_chat_id: str = "",
+    mcp_jwt: str = "",
 ) -> list:
     """Set all session context variables and return reset tokens.  Call
     ``clear_session_vars(tokens)`` in a ``finally``; not nestable, clearing resets every var
@@ -128,6 +158,7 @@ def set_session_vars(
     )
     tokens = [var.set(value) for var, value in zip(_SESSION_VARS, values)]
     tokens.append(_SESSION_ASYNC_DELIVERY.set(bool(async_delivery)))
+    tokens.append(_SESSION_MCP_JWT.set(mcp_jwt))
     _runtime_cwd("set_session_cwd", cwd)
     return tokens
 
@@ -138,6 +169,7 @@ def clear_session_vars(tokens: list) -> None:
     goes back to ``_UNSET``: a cleared context is default-supported, not opted-out."""
     for var in _SESSION_VARS:
         var.set("")
+    _SESSION_MCP_JWT.set("")
     _SESSION_ASYNC_DELIVERY.set(_UNSET)
     _runtime_cwd("clear_session_cwd")
 
@@ -150,6 +182,7 @@ def reset_session_vars() -> None:
     for var in _VAR_MAP.values():
         var.set(_UNSET)
     _SESSION_ASYNC_DELIVERY.set(_UNSET)
+    _SESSION_MCP_JWT.set(_UNSET)
     _runtime_cwd("clear_session_cwd")
 
 
@@ -188,6 +221,20 @@ def declare_stateless_channel() -> None:
     See NousResearch/hermes-agent#53027 and #63142.
     """
     _SESSION_ASYNC_DELIVERY.set(False)
+
+
+def get_session_mcp_jwt() -> Optional[str]:
+    """Read the JWT forwarded from the current API-server caller, if any.
+
+    Unlike get_session_env(), this NEVER falls back to os.environ — a
+    forwarded credential must not leak across sessions via a stale
+    process-global env var. Returns None when unset or explicitly cleared
+    (empty string).
+    """
+    value = _SESSION_MCP_JWT.get()
+    if value is _UNSET or not value:
+        return None
+    return value
 
 
 def async_delivery_supported() -> bool:
