@@ -318,6 +318,71 @@ class TestForwardedMCPJWT:
         finally:
             clear_session_vars(tokens)
 
+    def test_run_agent_binds_mcp_jwt_inside_executor(self, monkeypatch):
+        """_run_agent must re-bind the JWT inside the run_in_executor thread,
+        the same way it already re-binds request_profile — ContextVars set
+        on the event-loop thread do not automatically follow into the
+        executor thread."""
+        import asyncio
+        from gateway.session_context import get_session_mcp_jwt
+
+        config = PlatformConfig(enabled=True)
+        adapter = APIServerAdapter(config)
+
+        observed = {}
+
+        class _FakeAgent:
+            def run_conversation(self, **kwargs):
+                observed["mcp_jwt"] = get_session_mcp_jwt()
+                return {"final_response": "ok", "session_id": "s1"}
+
+            session_prompt_tokens = 0
+            session_completion_tokens = 0
+            session_total_tokens = 0
+
+        monkeypatch.setattr(adapter, "_create_agent", lambda **kw: _FakeAgent())
+
+        async def _drive():
+            return await adapter._run_agent(
+                user_message="hi",
+                conversation_history=[],
+                session_id="s1",
+                forwarded_mcp_jwt="forwarded-jwt-value",
+            )
+
+        asyncio.run(_drive())
+        assert observed["mcp_jwt"] == "forwarded-jwt-value"
+
+    def test_run_agent_without_forwarded_jwt_binds_none(self, monkeypatch):
+        import asyncio
+        from gateway.session_context import get_session_mcp_jwt
+
+        config = PlatformConfig(enabled=True)
+        adapter = APIServerAdapter(config)
+
+        observed = {}
+
+        class _FakeAgent:
+            def run_conversation(self, **kwargs):
+                observed["mcp_jwt"] = get_session_mcp_jwt()
+                return {"final_response": "ok", "session_id": "s1"}
+
+            session_prompt_tokens = 0
+            session_completion_tokens = 0
+            session_total_tokens = 0
+
+        monkeypatch.setattr(adapter, "_create_agent", lambda **kw: _FakeAgent())
+
+        async def _drive():
+            return await adapter._run_agent(
+                user_message="hi",
+                conversation_history=[],
+                session_id="s1",
+            )
+
+        asyncio.run(_drive())
+        assert observed["mcp_jwt"] is None
+
 
 # ---------------------------------------------------------------------------
 # Concurrency cap (gateway.api_server.max_concurrent_runs) — #7483
