@@ -399,3 +399,34 @@ const link = `hermes://mcp/install?name=example&config=${btoa(JSON.stringify(con
 ```
 
 Opening the link never installs anything by itself: the desktop app shows a confirmation dialog with the server name and the full pretty-printed config (with an extra caution for `command`-based servers, which run a local process), and the user must explicitly confirm. Existing server names are never overwritten — the user is asked to rename or cancel.
+
+## Forwarding a caller's JWT (`auth: forward_jwt`)
+
+For MCP servers that should authorize each tool call as the calling user
+(e.g. an internal API gateway that expects a per-user Bearer token), set
+`auth: forward_jwt` on the server entry:
+
+```yaml
+mcp_servers:
+  internal_gateway:
+    url: "https://internal.example.com/mcp"
+    auth: forward_jwt
+```
+
+Callers of hermes-agent's API server (`/v1/chat/completions`, `/v1/responses`,
+`/api/sessions/*/chat`, `/v1/runs`) supply the JWT via the
+`X-MCP-Authorization` request header:
+
+```
+X-MCP-Authorization: Bearer <jwt>
+```
+
+hermes-agent does not validate or decode this JWT — it is forwarded
+verbatim as the `Authorization` header on every outgoing request to this
+MCP server for the duration of that agent turn. If the header is absent,
+no `Authorization` header is added (the server's own static `headers`
+config, if any, is still applied).
+
+`auth: forward_jwt` is only valid on HTTP/SSE (`url`-based) servers, not
+stdio (`command`-based) servers, and cannot be combined with `auth: oauth`
+on the same entry — both are rejected at config save/load time.
