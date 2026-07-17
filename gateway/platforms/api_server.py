@@ -3050,6 +3050,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         gateway_session_key, key_err = self._parse_session_key_header(request)
         if key_err is not None:
             return None, key_err
+        forwarded_mcp_jwt = self._extract_forwarded_mcp_jwt(request)
         session_id = request.match_info["session_id"]
         session, err = await self._get_existing_session_or_404(session_id)
         if err:
@@ -3106,7 +3107,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             # #98619: the client addresses this session by construction — the id is in the
             # request path (/api/sessions/{session_id}/chat) — so a wake self-post lands where
             # the client will read it. The audited native-session opt-in.
-            session_history_delivery="1", **agent_overrides)
+            session_history_delivery="1", forwarded_mcp_jwt=forwarded_mcp_jwt, **agent_overrides)
         return {
             "gateway_session_key": gateway_session_key, "session_id": session_id, "body": body,
             "user_message": user_message, "runtime_request": runtime_request,
