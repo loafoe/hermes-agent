@@ -116,6 +116,8 @@ from datetime import datetime
 from typing import Any, Coroutine, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
+import httpx
+
 from tools.registry import tool_error
 from tools.ansi_strip import strip_unicode_tags
 
@@ -2371,6 +2373,34 @@ class ElicitationHandler:
 # Server task -- each MCP server lives in one long-lived asyncio Task
 # ---------------------------------------------------------------------------
 
+class _ForwardedJWTAuth(httpx.Auth):
+    """Injects a per-request Bearer token forwarded from the API-server caller.
+
+    Structurally parallel to HermesMCPOAuthProvider
+    (tools/mcp_oauth_manager.py) but far simpler: no token refresh, no 401
+    recovery — the JWT is opaque cargo owned by the caller, not a
+    credential hermes-agent manages. Only ``auth: forward_jwt`` MCP
+    servers install this (tools/mcp_tool.py's ``_run_http``); it forwards
+    whatever the caller supplied via ``X-MCP-Authorization`` on the
+    inbound API-server request, unvalidated.
+
+    httpx.Auth.auth_flow is a plain (non-async) generator; httpx accepts a
+    sync auth_flow transparently even on an async client (unlike
+    HermesMCPOAuthProvider, which overrides async_auth_flow specifically
+    to bridge the MCP SDK's bidirectional 401-retry protocol — not needed
+    here since this class never inspects the response).
+    """
+
+    def __init__(self, server: "MCPServerTask"):
+        self._server = server
+
+    def auth_flow(self, request):
+        jwt = getattr(self._server, "_pending_mcp_jwt", None)
+        if jwt:
+            request.headers["Authorization"] = f"Bearer {jwt}"
+        yield request
+
+
 class MCPServerTask:
     """Manages a single MCP server connection in a dedicated asyncio Task.
 
@@ -2388,7 +2418,7 @@ class MCPServerTask:
         "_sampling", "_elicitation",
         "_registered_tool_names", "_auth_type", "_refresh_lock",
         "_rpc_lock", "_pending_refresh_tasks",
-        "_pending_call_context",
+        "_pending_call_context", "_pending_mcp_jwt",
         "_lifecycle_started_at", "_last_tool_call_at",
         "_idle_timeout_seconds", "_max_lifetime_seconds", "_recycled_reason",
         "initialize_result", "_ping_unsupported", "_list_cache_meta",
@@ -2447,6 +2477,12 @@ class MCPServerTask:
         # gateway-platform attribution and routes the approval prompt
         # to the right surface (Telegram, Slack, etc.).
         self._pending_call_context: Optional[contextvars.Context] = None
+        # JWT forwarded from the API-server caller (X-MCP-Authorization),
+        # snapshotted immediately before scheduling a tool call onto the MCP
+        # background loop — same cross-thread bridge pattern as
+        # _pending_call_context above, since httpx.Auth.auth_flow runs on
+        # that same background loop, not the caller's thread/context.
+        self._pending_mcp_jwt: Optional[str] = None
         now = time.monotonic()
         self._lifecycle_started_at: float = now
         self._last_tool_call_at: float = now
