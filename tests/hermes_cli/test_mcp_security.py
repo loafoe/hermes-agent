@@ -201,3 +201,51 @@ def test_validator_rejects_forward_jwt_without_auth_field_change():
         "url": "https://example.com/mcp",
     })
     assert issues == []
+
+
+def test_validator_rejects_malformed_auth_value_mixing_oauth_and_forward_jwt():
+    from hermes_cli.mcp_security import validate_mcp_server_entry
+
+    issues = validate_mcp_server_entry("srv", {
+        "url": "https://example.com/mcp",
+        "auth": "oauth+forward_jwt",
+    })
+    assert issues
+    assert any("auth" in issue.lower() for issue in issues)
+
+
+def test_validator_allows_plain_oauth():
+    from hermes_cli.mcp_security import validate_mcp_server_entry
+
+    issues = validate_mcp_server_entry("srv", {
+        "url": "https://example.com/mcp",
+        "auth": "oauth",
+    })
+    assert issues == []
+
+
+def test_validator_allows_plain_forward_jwt():
+    from hermes_cli.mcp_security import validate_mcp_server_entry
+
+    issues = validate_mcp_server_entry("srv", {
+        "url": "https://example.com/mcp",
+        "auth": "forward_jwt",
+    })
+    assert issues == []
+
+
+def test_validator_allows_uppercase_and_whitespace_auth_values():
+    """tools/mcp_tool.py's MCPServerTask.run() normalizes auth via
+    (config.get('auth') or '').lower().strip() (see
+    tests/tools/test_config_null_guard.py::test_valid_auth_passed_through,
+    which confirms 'OAUTH' is accepted at runtime) — the validator must
+    normalize the same way, or it would reject configs the rest of the
+    codebase already treats as valid."""
+    from hermes_cli.mcp_security import validate_mcp_server_entry
+
+    assert validate_mcp_server_entry("srv", {
+        "url": "https://example.com/mcp", "auth": "OAUTH",
+    }) == []
+    assert validate_mcp_server_entry("srv", {
+        "url": "https://example.com/mcp", "auth": "  forward_jwt  ",
+    }) == []

@@ -178,15 +178,38 @@ def validate_mcp_server_entry(name: str, entry: dict[str, Any]) -> list[str]:
     return issues
 
 
+# Mirrors the normalization tools/mcp_tool.py's MCPServerTask.run() applies
+# at connect time: `(config.get("auth") or "").lower().strip()` (see
+# tests/tools/test_config_null_guard.py::test_valid_auth_passed_through,
+# which pins "OAUTH" as accepted at runtime). The validator must normalize
+# identically, or it would reject configs the rest of the codebase already
+# treats as valid.
+_RECOGNIZED_AUTH_VALUES = frozenset({"", "oauth", "forward_jwt"})
+
+
 def _validate_forward_jwt_auth(name: str, entry: dict[str, Any]) -> list[str]:
-    """Reject 'auth: forward_jwt' on entries that can't carry HTTP headers.
+    """Reject malformed or unsupported 'auth' values, and 'auth: forward_jwt'
+    on entries that can't carry HTTP headers.
 
     forward_jwt injects an Authorization header into an HTTP/SSE MCP
     transport (see tools/mcp_tool.py's MCPServerTask._auth_type). A stdio
-    server has no HTTP request to attach a header to, so this is always a
-    config mistake, not a legitimate use case.
+    server has no HTTP request to attach a header to, so that combination
+    is always a config mistake, not a legitimate use case. Likewise, since
+    ``auth`` is a single string field (not a list), a value like
+    ``"oauth+forward_jwt"`` cannot mean "both" — it is either a typo or an
+    attempt to combine two mutually exclusive auth modes that this schema
+    has no way to express, so it is rejected outright rather than silently
+    falling through to whichever mode tools/mcp_tool.py happens to check
+    first.
     """
-    if entry.get("auth") != "forward_jwt":
+    auth_value = (entry.get("auth") or "").strip().lower()
+    if auth_value not in _RECOGNIZED_AUTH_VALUES:
+        return [
+            f"MCP server '{name}' has an unrecognized 'auth' value "
+            f"'{entry.get('auth')}' — expected one of: oauth, forward_jwt, "
+            f"or omit the field entirely"
+        ]
+    if auth_value != "forward_jwt":
         return []
     issues: list[str] = []
     if not entry.get("url"):
