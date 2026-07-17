@@ -296,6 +296,28 @@ class TestForwardedMCPJWT:
         assert adapter._check_auth(mock_request) is not None  # still rejected
         assert adapter._extract_forwarded_mcp_jwt(mock_request) == "forwarded-jwt"  # still captured
 
+    def test_bind_api_server_session_threads_mcp_jwt(self):
+        from gateway.session_context import clear_session_vars, get_session_mcp_jwt
+
+        config = PlatformConfig(enabled=True)
+        adapter = APIServerAdapter(config)
+        tokens = adapter._bind_api_server_session(mcp_jwt="forwarded-jwt")
+        try:
+            assert get_session_mcp_jwt() == "forwarded-jwt"
+        finally:
+            clear_session_vars(tokens)
+
+    def test_bind_api_server_session_defaults_mcp_jwt_to_none(self):
+        from gateway.session_context import clear_session_vars, get_session_mcp_jwt
+
+        config = PlatformConfig(enabled=True)
+        adapter = APIServerAdapter(config)
+        tokens = adapter._bind_api_server_session()
+        try:
+            assert get_session_mcp_jwt() is None
+        finally:
+            clear_session_vars(tokens)
+
 
 # ---------------------------------------------------------------------------
 # Concurrency cap (gateway.api_server.max_concurrent_runs) — #7483
