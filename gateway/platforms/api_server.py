@@ -4624,6 +4624,7 @@ class APIServerAdapter(BasePlatformAdapter):
         gateway_session_key, key_err = self._parse_session_key_header(request)
         if key_err is not None:
             return key_err
+        forwarded_mcp_jwt = self._extract_forwarded_mcp_jwt(request)
         session_id = request.match_info["session_id"]
         session, err = await self._get_existing_session_or_404(session_id)
         if err:
@@ -4700,6 +4701,7 @@ class APIServerAdapter(BasePlatformAdapter):
             requested_runtime=runtime_request.get("requested") or {},
             route_source=runtime_request.get("route_source") or "global",
             confirmed_runtime_lock=lock_active,
+            forwarded_mcp_jwt=forwarded_mcp_jwt,
             **agent_overrides,
         )
         effective_session_id = result.get("session_id") if isinstance(result, dict) else session_id
@@ -4741,6 +4743,7 @@ class APIServerAdapter(BasePlatformAdapter):
         gateway_session_key, key_err = self._parse_session_key_header(request)
         if key_err is not None:
             return key_err
+        forwarded_mcp_jwt = self._extract_forwarded_mcp_jwt(request)
         session_id = request.match_info["session_id"]
         session, err = await self._get_existing_session_or_404(session_id)
         if err:
@@ -4873,6 +4876,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     requested_runtime=runtime_request.get("requested") or {},
                     route_source=runtime_request.get("route_source") or "global",
                     confirmed_runtime_lock=lock_active,
+                    forwarded_mcp_jwt=forwarded_mcp_jwt,
                     **agent_overrides,
                 )
                 final_response = _resolve_media_to_data_urls(result.get("final_response", "") if isinstance(result, dict) else "")
@@ -5124,6 +5128,7 @@ class APIServerAdapter(BasePlatformAdapter):
         gateway_session_key, key_err = self._parse_session_key_header(request)
         if key_err is not None:
             return key_err
+        forwarded_mcp_jwt = self._extract_forwarded_mcp_jwt(request)
 
         # Allow caller to continue an existing session by passing X-Hermes-Session-Id.
         # When provided, history is loaded from state.db instead of from the request body.
@@ -5292,6 +5297,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 gateway_session_key=gateway_session_key,
                 **agent_overrides,
                 route=route,
+                forwarded_mcp_jwt=forwarded_mcp_jwt,
             ))
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
@@ -5313,6 +5319,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 gateway_session_key=gateway_session_key,
                 **agent_overrides,
                 route=route,
+                forwarded_mcp_jwt=forwarded_mcp_jwt,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -6232,6 +6239,7 @@ class APIServerAdapter(BasePlatformAdapter):
         gateway_session_key, key_err = self._parse_session_key_header(request)
         if key_err is not None:
             return key_err
+        forwarded_mcp_jwt = self._extract_forwarded_mcp_jwt(request)
 
         # Parse request body
         try:
@@ -6403,6 +6411,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 gateway_session_key=gateway_session_key,
                 **agent_overrides,
                 route=route,
+                forwarded_mcp_jwt=forwarded_mcp_jwt,
             ))
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
@@ -6438,6 +6447,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 gateway_session_key=gateway_session_key,
                 **agent_overrides,
                 route=route,
+                forwarded_mcp_jwt=forwarded_mcp_jwt,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -7604,6 +7614,7 @@ class APIServerAdapter(BasePlatformAdapter):
         gateway_session_key, key_err = self._parse_session_key_header(request)
         if key_err is not None:
             return key_err
+        forwarded_mcp_jwt = self._extract_forwarded_mcp_jwt(request)
 
         # Enforce concurrency limit (shared across all agent-serving
         # endpoints; configurable via gateway.api_server.max_concurrent_runs).
@@ -7836,6 +7847,7 @@ class APIServerAdapter(BasePlatformAdapter):
                                 browser_control_transport_family=(
                                     request_browser_control_transport_family
                                 ),
+                                mcp_jwt=forwarded_mcp_jwt or "",
                             )
                             register_gateway_notify(approval_session_key, _approval_notify)
                             # /v1/runs runs its own agent lifecycle (no

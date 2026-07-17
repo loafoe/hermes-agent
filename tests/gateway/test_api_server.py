@@ -383,6 +383,48 @@ class TestForwardedMCPJWT:
         asyncio.run(_drive())
         assert observed["mcp_jwt"] is None
 
+    def test_chat_completions_forwards_mcp_jwt_to_agent(self):
+        """End-to-end: X-MCP-Authorization on the HTTP request is observable
+        via get_session_mcp_jwt() inside the agent's run_conversation call."""
+        import asyncio
+        from gateway.session_context import get_session_mcp_jwt
+
+        config = PlatformConfig(enabled=True)
+        adapter = APIServerAdapter(config)
+
+        observed = {}
+
+        class _FakeAgent:
+            def run_conversation(self, **kwargs):
+                observed["mcp_jwt"] = get_session_mcp_jwt()
+                return {"final_response": "ok", "session_id": "s1"}
+
+            session_prompt_tokens = 0
+            session_completion_tokens = 0
+            session_total_tokens = 0
+
+        adapter._create_agent = lambda **kw: _FakeAgent()
+
+        app = web.Application()
+        app.router.add_post("/v1/chat/completions", adapter._handle_chat_completions)
+
+        async def _drive():
+            server = TestServer(app)
+            await server.start_server()
+            client = TestClient(server)
+            try:
+                resp = await client.post(
+                    "/v1/chat/completions",
+                    json={"messages": [{"role": "user", "content": "hi"}]},
+                    headers={"X-MCP-Authorization": "Bearer e2e-forwarded-jwt"},
+                )
+                assert resp.status == 200
+            finally:
+                await client.close()
+
+        asyncio.run(_drive())
+        assert observed["mcp_jwt"] == "e2e-forwarded-jwt"
+
 
 # ---------------------------------------------------------------------------
 # Concurrency cap (gateway.api_server.max_concurrent_runs) — #7483
