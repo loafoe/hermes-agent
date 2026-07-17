@@ -322,6 +322,7 @@ class _RunLaunch:
     request_profile: Any
     browser_control_principal: Any
     browser_control_transport_family: Any
+    mcp_jwt: str
 
     @property
     def approval_session_key(self) -> str:
@@ -358,6 +359,7 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
     gateway_session_key, key_err = self._parse_session_key_header(request)
     if key_err is not None:
         return key_err
+    forwarded_mcp_jwt = self._extract_forwarded_mcp_jwt(request)
     try:
         body = await request.json()
     except Exception:
@@ -450,7 +452,8 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
             **{k: agent_overrides.get(k) for k in ("requested_model", "requested_provider", "model_options")}),
         request_profile=_api_server._api_request_profile.get(),
         browser_control_principal=_api_server._api_request_browser_control_principal.get(),
-        browser_control_transport_family=_api_server._api_request_browser_control_transport_family.get())
+        browser_control_transport_family=_api_server._api_request_browser_control_transport_family.get(),
+        mcp_jwt=forwarded_mcp_jwt or "")
     self._activate_admitted_request()
     task = self._active_run_tasks[run_id] = asyncio.create_task(_execute_run(self, launch, _api_server=_api_server))
     with suppress(TypeError):
@@ -486,7 +489,8 @@ def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_serve
             session_tokens = self._bind_api_server_session(
                 chat_id=session_id or "", session_key=run.approval_session_key, session_id=session_id or "",
                 browser_control_principal=run.browser_control_principal,
-                browser_control_transport_family=run.browser_control_transport_family)
+                browser_control_transport_family=run.browser_control_transport_family,
+                mcp_jwt=run.mcp_jwt)
             if session_tokens:
                 resets.append((session_tokens, clear_session_vars))
             if run.agent_kwargs["room_dispatch"] is not None:
