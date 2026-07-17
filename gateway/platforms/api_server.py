@@ -7188,6 +7188,7 @@ class APIServerAdapter(BasePlatformAdapter):
         session_id: str = "",
         browser_control_principal: str = "",
         browser_control_transport_family: str = "",
+        mcp_jwt: str = "",
     ) -> list:
         """Bind session contextvars for an API-server agent run.
 
@@ -7198,6 +7199,11 @@ class APIServerAdapter(BasePlatformAdapter):
         forgetting to mark the channel as non-delivering. There is no
         ``async_delivery`` parameter to get wrong; the stateless HTTP path can
         never wake the agent after the turn ends, on ANY route.
+
+        ``mcp_jwt`` is the caller's X-MCP-Authorization value (see
+        _extract_forwarded_mcp_jwt), forwarded to MCP servers configured
+        with ``auth: forward_jwt``. Empty string (the default) means no
+        JWT was supplied — get_session_mcp_jwt() returns None in that case.
 
         Returns reset tokens; pass them to ``clear_session_vars`` in a
         ``finally`` block (the binding is request-scoped and must not outlive
@@ -7215,6 +7221,7 @@ class APIServerAdapter(BasePlatformAdapter):
             browser_control_transport_family=browser_control_transport_family,
             async_delivery=False,
             cron_session="",
+            mcp_jwt=mcp_jwt,
         )
 
     async def _run_agent(
