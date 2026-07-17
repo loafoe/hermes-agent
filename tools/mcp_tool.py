@@ -5887,10 +5887,20 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                 # task, which doesn't inherit our contextvars) can replay
                 # it and detect the gateway platform / session for routing.
                 server._pending_call_context = contextvars.copy_context()
+                # Snapshot the caller's forwarded JWT (if any) for
+                # _ForwardedJWTAuth.auth_flow to read during the outgoing
+                # HTTP request this call_tool() triggers. Same cross-thread
+                # bridge rationale as _pending_call_context above: this
+                # coroutine runs on the MCP background loop, which does not
+                # inherit the caller's session ContextVars.
+                from gateway.session_context import get_session_mcp_jwt
+
+                server._pending_mcp_jwt = get_session_mcp_jwt()
                 try:
                     result = await server.session.call_tool(tool_name, arguments=args)
                 finally:
                     server._pending_call_context = None
+                    server._pending_mcp_jwt = None
             # The RPC round-trip completed — the session is demonstrably
             # healthy at the transport level (even if the tool itself
             # returned isError). Clear the rapid-drop budget (#62212).

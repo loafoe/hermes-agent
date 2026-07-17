@@ -83,3 +83,90 @@ def test_forwarded_jwt_auth_reads_fresh_value_each_call():
     request_b = httpx.Request("POST", "https://example.com/mcp")
     outgoing_b = next(auth.auth_flow(request_b))
     assert outgoing_b.headers["Authorization"] == "Bearer token-b"
+
+
+def test_make_tool_handler_snapshots_session_mcp_jwt_during_call(monkeypatch, tmp_path):
+    """_make_tool_handler's _call() must snapshot get_session_mcp_jwt() into
+    server._pending_mcp_jwt before session.call_tool(), and clear it after —
+    mirroring the existing _pending_call_context bridge for elicitation."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    import json
+    from unittest.mock import MagicMock
+
+    from tools import mcp_tool
+    from tools.mcp_tool import MCPServerTask, _make_tool_handler
+    from gateway.session_context import clear_session_vars, set_session_vars
+
+    server = MCPServerTask("srv")
+    observed = {}
+
+    async def _call_tool_records(*a, **kw):
+        observed["pending_mcp_jwt"] = server._pending_mcp_jwt
+        result = MagicMock()
+        result.isError = False
+        result.content = []
+        result.structuredContent = None
+        return result
+
+    session = MagicMock()
+    session.call_tool = _call_tool_records
+    server.session = session
+    server._ready = MagicMock()
+    server._ready.is_set.return_value = True
+
+    mcp_tool._servers["srv"] = server
+    mcp_tool._server_error_counts.pop("srv", None)
+    mcp_tool._ensure_mcp_loop()
+
+    tokens = set_session_vars(mcp_jwt="bridge-test-jwt")
+    try:
+        handler = _make_tool_handler("srv", "tool1", 10.0)
+        handler({"arg": "v"})
+    finally:
+        clear_session_vars(tokens)
+        mcp_tool._servers.pop("srv", None)
+        mcp_tool._server_error_counts.pop("srv", None)
+
+    assert observed["pending_mcp_jwt"] == "bridge-test-jwt"
+    assert server._pending_mcp_jwt is None  # cleared after the call
+
+
+def test_make_tool_handler_pending_mcp_jwt_none_when_not_bound(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    from unittest.mock import MagicMock
+
+    from tools import mcp_tool
+    from tools.mcp_tool import MCPServerTask, _make_tool_handler
+    from gateway.session_context import reset_session_vars
+
+    reset_session_vars()
+
+    server = MCPServerTask("srv")
+    observed = {}
+
+    async def _call_tool_records(*a, **kw):
+        observed["pending_mcp_jwt"] = server._pending_mcp_jwt
+        result = MagicMock()
+        result.isError = False
+        result.content = []
+        result.structuredContent = None
+        return result
+
+    session = MagicMock()
+    session.call_tool = _call_tool_records
+    server.session = session
+    server._ready = MagicMock()
+    server._ready.is_set.return_value = True
+
+    mcp_tool._servers["srv"] = server
+    mcp_tool._server_error_counts.pop("srv", None)
+    mcp_tool._ensure_mcp_loop()
+
+    try:
+        handler = _make_tool_handler("srv", "tool1", 10.0)
+        handler({"arg": "v"})
+    finally:
+        mcp_tool._servers.pop("srv", None)
+        mcp_tool._server_error_counts.pop("srv", None)
+
+    assert observed["pending_mcp_jwt"] is None
