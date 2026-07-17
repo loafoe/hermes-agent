@@ -1972,6 +1972,26 @@ class APIServerAdapter(BasePlatformAdapter):
             status=401,
         )
 
+    def _extract_forwarded_mcp_jwt(self, request: "web.Request") -> Optional[str]:
+        """Extract the caller-supplied JWT to forward to MCP servers.
+
+        Returns None if absent. Not validated or decoded — hermes-agent is
+        a pure forwarder here, matching picoclaw's trust model: the JWT is
+        opaque cargo, and it is the downstream MCP server's job to verify
+        it. Independent of _check_auth — this header can be present or
+        absent regardless of whether the gateway's own API-key auth
+        passes or fails; it is up to the caller to also satisfy
+        _check_auth via the ordinary Authorization header.
+        """
+        raw = request.headers.get("X-MCP-Authorization", "").strip()
+        if not raw:
+            return None
+        if raw.startswith("Bearer "):
+            raw = raw[7:].strip()
+        if not raw or re.search(r'[\r\n\x00]', raw):
+            return None
+        return raw
+
     @staticmethod
     def _normalize_callback_platform(value: str) -> str:
         normalized = (value or "").strip().lower().replace("-", "_")
