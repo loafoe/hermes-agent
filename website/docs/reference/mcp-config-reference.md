@@ -414,7 +414,7 @@ mcp_servers:
 ```
 
 Callers of hermes-agent's API server (`/v1/chat/completions`, `/v1/responses`,
-`/api/sessions/*/chat`, `/v1/runs`) supply the JWT via the
+`/api/sessions/*/chat[/stream]`, `/v1/runs`) supply the JWT via the
 `X-MCP-Authorization` request header:
 
 ```
