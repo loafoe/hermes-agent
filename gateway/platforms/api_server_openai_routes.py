@@ -453,6 +453,7 @@ class OpenAICompatRoutesMixin:
         if key_err is not None:
             return key_err
         forwarded_mcp_jwt = self._extract_forwarded_mcp_jwt(request)
+        forwarded_llm_jwt = self._extract_forwarded_llm_jwt(request)
         # X-Hermes-Session-Id continues an existing session (history from state.db, not the body);
         # requires a configured API key or any client could read history by guessing ids.
         provided_session_id = request.headers.get("X-Hermes-Session-Id", "").strip()
@@ -496,6 +497,7 @@ class OpenAICompatRoutesMixin:
             user_message=user_message, conversation_history=history,
             ephemeral_system_prompt=system_prompt, session_id=session_id,
             gateway_session_key=gateway_session_key, forwarded_mcp_jwt=forwarded_mcp_jwt,
+            forwarded_llm_jwt=forwarded_llm_jwt,
             **agent_overrides, route=route)
         if stream:
             _stream_q = ThreadSafeAsyncQueue()
@@ -744,6 +746,7 @@ class OpenAICompatRoutesMixin:
         if key_err is not None:
             return key_err
         forwarded_mcp_jwt = self._extract_forwarded_mcp_jwt(request)
+        forwarded_llm_jwt = self._extract_forwarded_llm_jwt(request)
         try:
             body = await request.json()
         except Exception:
@@ -828,7 +831,8 @@ class OpenAICompatRoutesMixin:
             user_message=user_message, conversation_history=conversation_history,
             ephemeral_system_prompt=instructions, session_id=session_id,
             gateway_session_key=gateway_session_key, bind_declared_conversation=_declared_selected,
-            forwarded_mcp_jwt=forwarded_mcp_jwt, **agent_overrides, route=route)
+            forwarded_mcp_jwt=forwarded_mcp_jwt, forwarded_llm_jwt=forwarded_llm_jwt,
+            **agent_overrides, route=route)
         if stream:
             _stream_q = ThreadSafeAsyncQueue()
 

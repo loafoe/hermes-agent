@@ -2075,7 +2075,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     def _select_agent_runtime(
         self, runtime_kwargs: Dict[str, Any], model: str, *, requested_model: Optional[str],
         requested_provider: Optional[str], route: Optional[Dict[str, Any]], session_model: Optional[str],
-        confirmed_runtime_lock: bool, gateway_session_key: Optional[str], session_id: Optional[str]) -> tuple:
+        confirmed_runtime_lock: bool, gateway_session_key: Optional[str], session_id: Optional[str],
+        forwarded_llm_jwt: Optional[str] = None) -> tuple:
         """Apply the model/provider precedence chain for one agent (mutates ``runtime_kwargs``):
         confirmed Browser lock > session ``/model`` override > session-persisted model >
         model_routes alias > per-request provider/model > global defaults. A confirmed lock
@@ -2134,6 +2135,16 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 value = _clean_request_string(route_cfg.get(key))
                 if value:
                     runtime_kwargs[key] = value
+            if route_cfg.get("forward_caller_jwt") and forwarded_llm_jwt:
+                # Full replace, not additive: the caller's own JWT becomes the ONLY Bearer
+                # credential sent to this route's provider. Never log the JWT value itself
+                # (same rule as api_key above). forwarded_caller_jwt=True flows through
+                # **runtime_kwargs into AIAgent(...) in _create_agent.
+                runtime_kwargs["api_key"] = forwarded_llm_jwt
+                runtime_kwargs["forwarded_caller_jwt"] = True
+                logger.debug(
+                    "api_server model route %s: forwarding caller JWT as provider credential",
+                    route_model or model)
             if route:
                 logger.debug(
                     "api_server request selection applied: model=%s provider=%s route_provider=%s request_provider=%s",
@@ -2149,11 +2160,17 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         model_options: Optional[Dict[str, Any]] = None, route: Optional[Dict[str, Any]] = None,
         session_model: Optional[str] = None, confirmed_runtime_lock: bool = False,
         room_dispatch: Optional[Dict[str, Any]] = None,
-        room_execution_policy: Optional[Dict[str, Any]] = None) -> Any:
+        room_execution_policy: Optional[Dict[str, Any]] = None,
+        forwarded_llm_jwt: Optional[str] = None) -> Any:
         """Create an AIAgent from the gateway runtime config + platform toolsets.
         ``gateway_session_key`` persists across transcripts (memory scope), unlike ``session_id``;
         ``route`` / ``session_model`` are mutually exclusive; ``confirmed_runtime_lock`` beats the
-        session ``/model`` override, disables the fallback chain and fails closed."""
+        session ``/model`` override, disables the fallback chain and fails closed.
+
+        When the matched route also sets ``forward_caller_jwt: true`` and ``forwarded_llm_jwt`` is
+        set, the caller's JWT replaces ``api_key`` entirely for this agent's primary LLM client —
+        see ``_select_agent_runtime``. Does NOT affect auxiliary/fallback clients (compression,
+        vision, title-generation), which continue using the route's/global static credential."""
         from run_agent import AIAgent
         from gateway.run import (
             _checkpoint_agent_kwargs, _current_max_iterations, _resolve_runtime_agent_kwargs,
@@ -2174,7 +2191,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             runtime_kwargs, model,
             requested_model=requested_model, requested_provider=requested_provider, route=route,
             session_model=session_model, confirmed_runtime_lock=confirmed_runtime_lock,
-            gateway_session_key=gateway_session_key, session_id=session_id)
+            gateway_session_key=gateway_session_key, session_id=session_id,
+            forwarded_llm_jwt=forwarded_llm_jwt)
         user_config = _load_gateway_config()
         enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
         max_iterations = _current_max_iterations()
@@ -3032,6 +3050,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         if key_err is not None:
             return None, key_err
         forwarded_mcp_jwt = self._extract_forwarded_mcp_jwt(request)
+        forwarded_llm_jwt = self._extract_forwarded_llm_jwt(request)
         session_id = request.match_info["session_id"]
         session, err = await self._get_existing_session_or_404(session_id)
         if err:
@@ -3080,7 +3099,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             gateway_session_key=gateway_session_key, route=route, session_model=session_model,
             requested_runtime=runtime_request.get("requested") or {},
             route_source=runtime_request.get("route_source") or "global",
-            confirmed_runtime_lock=lock_active, forwarded_mcp_jwt=forwarded_mcp_jwt, **agent_overrides)
+            confirmed_runtime_lock=lock_active, forwarded_mcp_jwt=forwarded_mcp_jwt,
+            forwarded_llm_jwt=forwarded_llm_jwt, **agent_overrides)
         return {
             "gateway_session_key": gateway_session_key, "session_id": session_id, "body": body,
             "user_message": user_message, "runtime_request": runtime_request,
@@ -3686,7 +3706,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         route: Optional[Dict[str, Any]] = None, session_model: Optional[str] = None,
         requested_runtime: Optional[Dict[str, Any]] = None, route_source: str = "global",
         confirmed_runtime_lock: bool = False, bind_declared_conversation: bool = False,
-        forwarded_mcp_jwt: Optional[str] = None) -> tuple:
+        forwarded_mcp_jwt: Optional[str] = None, forwarded_llm_jwt: Optional[str] = None) -> tuple:
         """Create an agent and run one turn in a thread executor -> ``(result, usage)``.
         ``agent_ref[0]`` receives the agent so SSE writers can interrupt it; ``active_run_id``
         registers it in ``_active_run_agents``. Under a confirmed model lock the actual
@@ -3714,7 +3734,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                         tool_start_callback=tool_start_callback, tool_complete_callback=tool_complete_callback,
                         gateway_session_key=gateway_session_key, requested_model=requested_model,
                         requested_provider=requested_provider, model_options=model_options, route=route,
-                        session_model=session_model, confirmed_runtime_lock=confirmed_runtime_lock)
+                        session_model=session_model, confirmed_runtime_lock=confirmed_runtime_lock,
+                        forwarded_llm_jwt=forwarded_llm_jwt)
                     if agent_ref is not None:
                         agent_ref[0] = agent
                     if active_run_id:
