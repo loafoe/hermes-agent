@@ -2660,6 +2660,38 @@ class TestModelRoutesParsing:
         adapter = _make_routing_adapter({"bad": {"provider": "openrouter"}})
         assert adapter._model_routes == {}
 
+    def test_forward_caller_jwt_flag_is_parsed_as_bool(self):
+        routes = {
+            "gateway-model": {
+                "model": "anthropic.claude-sonnet-4-6",
+                "forward_caller_jwt": True,
+            }
+        }
+        adapter = _make_routing_adapter(routes)
+        assert adapter._model_routes["gateway-model"]["forward_caller_jwt"] is True
+
+    def test_forward_caller_jwt_defaults_to_absent(self):
+        routes = {"plain": {"model": "openai/gpt-5"}}
+        adapter = _make_routing_adapter(routes)
+        assert "forward_caller_jwt" not in adapter._model_routes["plain"]
+
+    def test_forward_caller_jwt_false_is_dropped_not_stored_as_false(self):
+        """Matches the existing allowed_keys behavior: falsy/absent values
+        are omitted from the route dict entirely, not stored as False —
+        keeps `route.get("forward_caller_jwt")` truthy-checkable everywhere
+        without a second `is True` guard at every call site."""
+        routes = {"plain": {"model": "openai/gpt-5", "forward_caller_jwt": False}}
+        adapter = _make_routing_adapter(routes)
+        assert "forward_caller_jwt" not in adapter._model_routes["plain"]
+
+    def test_forward_caller_jwt_truthy_string_yaml_value(self):
+        """YAML `forward_caller_jwt: "true"` (a string) must not be trusted
+        as a bool without normalization — guards against a config typo
+        silently forwarding nothing while looking configured."""
+        routes = {"plain": {"model": "openai/gpt-5", "forward_caller_jwt": "true"}}
+        adapter = _make_routing_adapter(routes)
+        assert adapter._model_routes["plain"]["forward_caller_jwt"] is True
+
 
 class TestModelRoutesModelsEndpoint:
 

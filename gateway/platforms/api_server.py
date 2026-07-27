@@ -2362,6 +2362,33 @@ class APIServerAdapter(BasePlatformAdapter):
 
         return raw, None
 
+    def _extract_forwarded_llm_jwt(self, request: "web.Request") -> Optional[str]:
+        """Extract the caller-supplied JWT to forward to the LLM provider.
+
+        Returns None if absent. Not validated or decoded — hermes-agent is
+        a pure forwarder here: the JWT is opaque cargo, and it is the
+        downstream LLM provider's job to verify it. Independent of
+        _check_auth — this header can be present or absent regardless of
+        whether the gateway's own API-key auth passes or fails; it is up
+        to the caller to also satisfy _check_auth via the ordinary
+        Authorization header.
+
+        Deliberately a distinct header from ``X-MCP-Authorization`` (used
+        by the separate MCP-JWT-forwarding feature to authorize outgoing
+        MCP tool calls) — the two forward a caller's JWT to different
+        trust boundaries (LLM provider vs. MCP server) and are configured
+        independently. A caller that wants the same token forwarded to
+        both sends both headers.
+        """
+        raw = request.headers.get("X-LLM-Authorization", "").strip()
+        if not raw:
+            return None
+        if raw.startswith("Bearer "):
+            raw = raw[7:].strip()
+        if not raw or re.search(r'[\r\n\x00]', raw):
+            return None
+        return raw
+
     # ------------------------------------------------------------------
     # Session DB helper
     # ------------------------------------------------------------------
@@ -2466,9 +2493,13 @@ class APIServerAdapter(BasePlatformAdapter):
     def _parse_model_routes(raw: Any) -> Dict[str, Dict[str, Any]]:
         """Validate and normalize the ``model_routes`` config block.
 
-        Accepts a mapping of ``alias -> {model, provider?, api_key?, base_url?}``.
-        Invalid shapes are dropped (never raised) so a config typo can't take
-        the whole API server down.  Route values are coerced to strings.
+        Accepts a mapping of ``alias -> {model, provider?, api_key?, base_url?,
+        forward_caller_jwt?}``. Invalid shapes are dropped (never raised) so a
+        config typo can't take the whole API server down.  String route
+        values are coerced to strings; ``forward_caller_jwt`` is coerced to
+        bool via YAML-boolean-string normalization (accepts ``true``/``yes``/
+        ``1``/``on``, case-insensitive, matching the rest of the config
+        schema's boolean handling elsewhere in the codebase).
 
         Security: per-route ``api_key`` values are UPSTREAM provider
         credentials (used to call the routed model's backend), not caller
@@ -2476,6 +2507,10 @@ class APIServerAdapter(BasePlatformAdapter):
         API_SERVER_KEY bearer token via ``_check_auth``.  Route api_keys must
         never be logged; only alias names and non-secret fields may appear in
         logs.
+
+        ``forward_caller_jwt: true`` means this route's upstream call uses the
+        caller's own X-LLM-Authorization JWT as the Bearer credential INSTEAD
+        OF ``api_key`` (full replace, not additive) — see ``_create_agent``.
         """
         if not isinstance(raw, dict):
             if raw:
@@ -2499,6 +2534,14 @@ class APIServerAdapter(BasePlatformAdapter):
                 for key in allowed_keys
                 if cfg.get(key) is not None and str(cfg[key]).strip()
             }
+            if cfg.get("forward_caller_jwt") is not None:
+                raw_flag = cfg["forward_caller_jwt"]
+                if isinstance(raw_flag, bool):
+                    flag = raw_flag
+                else:
+                    flag = str(raw_flag).strip().lower() in ("true", "yes", "1", "on")
+                if flag:
+                    route["forward_caller_jwt"] = True
             if not route.get("model"):
                 logger.warning(
                     "api_server model_routes: route %r has no 'model'; dropping", alias_str
