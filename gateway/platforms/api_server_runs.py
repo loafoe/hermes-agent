@@ -425,6 +425,7 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
     if key_err is not None:
         return key_err
     forwarded_mcp_jwt = self._extract_forwarded_mcp_jwt(request)
+    forwarded_llm_jwt = self._extract_forwarded_llm_jwt(request)
     try:
         body = await request.json()
     except Exception:
@@ -534,6 +535,7 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         agent_kwargs=dict(
             ephemeral_system_prompt=instructions, session_id=session_id, gateway_session_key=gateway_session_key,
             route=route, room_dispatch=room_dispatch, room_execution_policy=room_execution_policy,
+            forwarded_llm_jwt=forwarded_llm_jwt,
             **{k: agent_overrides.get(k) for k in ("requested_model", "requested_provider", "model_options")}),
         request_profile=_api_server._api_request_profile.get(),
         browser_control_principal=_api_server._api_request_browser_control_principal.get(),
