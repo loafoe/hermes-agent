@@ -1010,12 +1010,15 @@ def _init_openai_client(agent, api_key, base_url, fallback_model, _provider_time
         raise RuntimeError(f"Failed to initialize OpenAI client: {e}")
 
 
-def _build_client(agent, api_key, base_url, fallback_model):
+def _build_client(agent, api_key, base_url, fallback_model, forwarded_caller_jwt=False):
     # LLM client per wire mode (raw_codex=True: the main agent needs direct
     # responses.stream()). One provider/model timeout up front so every path applies it.
     agent._anthropic_client = None
     agent._is_anthropic_oauth = False
     _provider_timeout = get_provider_request_timeout(agent.provider, agent.model)
+
+    agent._forwarded_caller_jwt_in_use = bool(forwarded_caller_jwt)
+
     if agent.api_mode == "anthropic_messages":
         _init_anthropic_client(agent, api_key, base_url, _provider_timeout)
     elif agent.provider == "moa":
@@ -2409,6 +2412,7 @@ def init_agent(
     requested_provider: str = None, capabilities: Optional[Dict[str, bool]] = None, cwd: Optional[str] = None,
     side_agent: bool = False, memory_manager=None,
     tool_result_metadata_callback: Optional[Callable[..., dict]] = None,
+    forwarded_caller_jwt: bool = False,
 ):
     _install_safe_stdio()
 
@@ -2474,7 +2478,7 @@ def init_agent(
     _init_turn_state(agent, run_budget_seconds)
     _setup_logging(agent)
     _set_defaults(agent, _STREAM_STATE)
-    _build_client(agent, api_key, base_url, fallback_model)
+    _build_client(agent, api_key, base_url, fallback_model, forwarded_caller_jwt)
     _init_fallback_chain(agent, fallback_model)
     _load_tools(agent, enabled_toolsets, disabled_toolsets)
     _init_session_state(
