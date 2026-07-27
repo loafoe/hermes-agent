@@ -2693,6 +2693,120 @@ class TestModelRoutesParsing:
         assert adapter._model_routes["plain"]["forward_caller_jwt"] is True
 
 
+class TestForwardedLLMJWT:
+    def test_extract_returns_none_when_header_absent(self):
+        config = PlatformConfig(enabled=True)
+        adapter = APIServerAdapter(config)
+        mock_request = MagicMock()
+        mock_request.headers = {}
+        assert adapter._extract_forwarded_llm_jwt(mock_request) is None
+
+    def test_extract_strips_bearer_prefix(self):
+        config = PlatformConfig(enabled=True)
+        adapter = APIServerAdapter(config)
+        mock_request = MagicMock()
+        mock_request.headers = {"X-LLM-Authorization": "Bearer eyJ.example.jwt"}
+        assert adapter._extract_forwarded_llm_jwt(mock_request) == "eyJ.example.jwt"
+
+    def test_extract_accepts_raw_token_without_bearer_prefix(self):
+        config = PlatformConfig(enabled=True)
+        adapter = APIServerAdapter(config)
+        mock_request = MagicMock()
+        mock_request.headers = {"X-LLM-Authorization": "eyJ.example.jwt"}
+        assert adapter._extract_forwarded_llm_jwt(mock_request) == "eyJ.example.jwt"
+
+    def test_extract_rejects_control_characters(self):
+        config = PlatformConfig(enabled=True)
+        adapter = APIServerAdapter(config)
+        mock_request = MagicMock()
+        mock_request.headers = {"X-LLM-Authorization": "Bearer bad\r\ntoken"}
+        assert adapter._extract_forwarded_llm_jwt(mock_request) is None
+
+    def test_extract_is_independent_of_check_auth(self):
+        """X-LLM-Authorization is captured regardless of the gateway's own
+        API-key auth outcome — _check_auth is a separate, unmodified gate."""
+        config = PlatformConfig(enabled=True, extra={"key": "sk-test123"})
+        adapter = APIServerAdapter(config)
+        mock_request = MagicMock()
+        mock_request.headers = {
+            "Authorization": "Bearer wrong-key",
+            "X-LLM-Authorization": "Bearer forwarded-jwt",
+        }
+        assert adapter._check_auth(mock_request) is not None  # still rejected
+        assert adapter._extract_forwarded_llm_jwt(mock_request) == "forwarded-jwt"  # still captured
+
+    def test_extract_is_independent_of_mcp_jwt_header(self):
+        """X-LLM-Authorization and X-MCP-Authorization are two separate,
+        independently-configured forwarding targets — this feature never
+        reads the MCP header, even if only that one is present."""
+        config = PlatformConfig(enabled=True)
+        adapter = APIServerAdapter(config)
+        mock_request = MagicMock()
+        mock_request.headers = {"X-MCP-Authorization": "Bearer mcp-only-jwt"}
+        assert adapter._extract_forwarded_llm_jwt(mock_request) is None
+
+
+class TestForwardCallerJwtToProvider:
+    """route['forward_caller_jwt'] substitutes the caller's X-LLM-Authorization
+    JWT for the route's configured api_key when building the per-request agent."""
+
+    def _make_adapter_with_route(self, route_extra, monkeypatch, captured):
+        routes = {
+            "gateway-model": {
+                "model": "anthropic.claude-sonnet-4-6",
+                "api_key": "static-configured-key",
+                "base_url": "https://agentgateway.internal/v1",
+                **route_extra,
+            }
+        }
+        adapter = _make_routing_adapter(routes)
+
+        class _FakeAgent:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        _patch_create_agent_runtime(monkeypatch, captured, _FakeAgent)
+        return adapter
+
+    def test_forward_caller_jwt_replaces_static_api_key_when_header_present(self, monkeypatch):
+        captured = {}
+        adapter = self._make_adapter_with_route(
+            {"forward_caller_jwt": True}, monkeypatch, captured
+        )
+        route = adapter._resolve_route("gateway-model")
+        adapter._create_agent(route=route, forwarded_llm_jwt="caller.jwt.value")
+        assert captured["api_key"] == "caller.jwt.value"
+
+    def test_forward_caller_jwt_false_keeps_static_api_key(self, monkeypatch):
+        captured = {}
+        adapter = self._make_adapter_with_route({}, monkeypatch, captured)
+        route = adapter._resolve_route("gateway-model")
+        adapter._create_agent(route=route, forwarded_llm_jwt="caller.jwt.value")
+        assert captured["api_key"] == "static-configured-key"
+
+    def test_forward_caller_jwt_true_but_no_header_falls_back_to_static_key(self, monkeypatch):
+        """A route opted in to forwarding, but this particular caller sent no
+        X-LLM-Authorization header — must not silently drop auth entirely."""
+        captured = {}
+        adapter = self._make_adapter_with_route(
+            {"forward_caller_jwt": True}, monkeypatch, captured
+        )
+        route = adapter._resolve_route("gateway-model")
+        adapter._create_agent(route=route, forwarded_llm_jwt=None)
+        assert captured["api_key"] == "static-configured-key"
+
+    def test_no_route_forward_caller_jwt_is_a_no_op(self, monkeypatch):
+        """Global-default (no model_routes match) path must be completely
+        unaffected by a caller JWT arriving on the request."""
+        captured = {}
+        _patch_create_agent_runtime(monkeypatch, captured, type("FakeAgent", (), {
+            "__init__": lambda self, **kwargs: captured.update(kwargs)
+        }))
+        adapter = _make_routing_adapter({})
+        adapter._create_agent(route=None, forwarded_llm_jwt="caller.jwt.value")
+        assert captured["api_key"] == "sk-global"
+
+
 class TestModelRoutesModelsEndpoint:
 
     @pytest.mark.asyncio
