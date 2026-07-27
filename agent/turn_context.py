@@ -383,8 +383,19 @@ def _publish_runtime_main(agent: Any) -> None:
         set_runtime_main(
             _str_attr(agent, "provider"), _str_attr(agent, "model"),
             **{k: _str_attr(agent, k) for k in (
-                "requested_provider", "base_url", "api_key", "api_mode", "auth_mode", "session_id"
+                "requested_provider", "base_url", "api_mode", "auth_mode", "session_id"
             )},
+            # A caller-forwarded JWT (agent-jwt-forwarding, Task 2) is scoped
+            # to this turn's PRIMARY chat call only — never publish it into
+            # the main-runtime context aux/fallback clients read back via
+            # _normalize_main_runtime(), or compression/vision/title-gen
+            # calls would silently start sending the end user's own JWT as
+            # their Bearer credential too. See docs/superpowers/plans/
+            # 2026-07-25-llm-jwt-forwarding.md Task 3.
+            api_key=(
+                "" if getattr(agent, "_forwarded_caller_jwt_in_use", False)
+                else _str_attr(agent, "api_key")
+            ),
             cache_scope=_cache_scope,
         )
 
