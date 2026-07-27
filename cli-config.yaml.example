@@ -921,11 +921,29 @@ group_sessions_per_user: true
 #           gpt-5:
 #             model: "openai/gpt-5"
 #             provider: "openrouter"
+#           # Route to an OpenAI-compatible gateway (e.g. agentgateway) that
+#           # authorizes each call as the calling END USER rather than as a
+#           # static Hermes-wide credential.  The caller supplies their own
+#           # JWT via the X-LLM-Authorization request header.
+#           bedrock-gateway:
+#             model: "anthropic.claude-sonnet-4-6"
+#             base_url: "https://agentgateway.internal/v1"
+#             forward_caller_jwt: true        # replaces api_key with the
+#                                              # caller's X-LLM-Authorization
+#                                              # JWT for THIS route's calls only
+#             # api_key: "fallback-key"       # used only if the caller sends
+#                                              # no X-LLM-Authorization header
 #
 # Configured aliases are automatically listed by GET /v1/models so clients
 # can discover them without manual coordination.  Caller authentication is
 # unchanged: every request still authenticates with the global API server
 # key (``extra.key`` / API_SERVER_KEY).
+#
+# ``forward_caller_jwt`` is scoped to this route's PRIMARY chat call only —
+# auxiliary calls the agent makes during the same session (context
+# compression, image/vision analysis, session title generation) never
+# receive the forwarded JWT; they continue using this route's static
+# ``api_key`` (if set) or the global default credential.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Gateway Streaming
