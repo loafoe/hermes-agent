@@ -411,6 +411,59 @@ Example:
 }
 ```
 
+### Forwarding the caller's own JWT to the LLM provider
+
+A `model_routes` entry can opt in to forwarding the calling HTTP client's own
+JWT as the credential Hermes uses when it calls out to that route's
+OpenAI-compatible LLM provider — instead of a statically configured provider
+API key. This is useful when the provider itself is a gateway (e.g.
+`agentgateway`-fronted Bedrock) that authorizes each request as the calling
+end user rather than as a single Hermes-wide service credential.
+
+Set `forward_caller_jwt: true` on the route and have the caller supply their
+JWT via the `X-LLM-Authorization` request header:
+
+```yaml
+gateway:
+  platforms:
+    api_server:
+      model_routes:
+        bedrock-gateway:
+          model: "anthropic.claude-sonnet-4-6"
+          base_url: "https://agentgateway.internal/v1"
+          forward_caller_jwt: true
+          # api_key: "fallback-key"   # used only if the caller sends no header
+```
+
+```
+X-LLM-Authorization: Bearer <caller-jwt>
+```
+
+Notes:
+
+- Hermes does not validate, decode, or inspect the JWT — it is opaque cargo,
+  forwarded byte-for-byte as the provider's `Authorization: Bearer` header.
+- `forward_caller_jwt: true` is a **full replace**, not additive: when the
+  header is present, it is the *only* Bearer credential sent to the provider
+  for that call — any statically configured route `api_key` is discarded for
+  calls that carry a caller JWT. If the header is absent, the route falls
+  back to its configured `api_key` (or the global default) as usual.
+- Scope is the **primary chat-completion call only** — auxiliary/fallback
+  calls the agent makes during the same session (context compression, image
+  analysis, session title generation) never receive the forwarded JWT; they
+  continue using the route's static `api_key`, if configured.
+- Only applies to `model_routes` entries (per-route, explicit opt-in) — never
+  to the global default provider.
+- `X-LLM-Authorization` is a distinct header from `X-MCP-Authorization`
+  (used separately to forward a caller's JWT to MCP servers configured with
+  `auth: forward_jwt`; see the MCP config reference). The two are configured
+  independently — enabling one has no effect on the other — and a caller
+  that wants the same token forwarded to both destinations sends both
+  headers.
+- The gateway's own API-key authentication (`API_SERVER_KEY`) is unchanged:
+  every request still authenticates the ordinary way regardless of whether
+  `X-LLM-Authorization` is present.
+
 ### GET /health
 
 Health check. Returns `{"status": "ok"}`. Also available at **GET /v1/health** for OpenAI-compatible clients that expect the `/v1/` prefix.
