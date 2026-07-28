@@ -2373,6 +2373,17 @@ class ElicitationHandler:
 # Server task -- each MCP server lives in one long-lived asyncio Task
 # ---------------------------------------------------------------------------
 
+class ForwardedJwtAuthError(Exception):
+    """A forward_jwt server rejected the caller's forwarded JWT.
+
+    Raised by :func:`_run_on_mcp_loop` (via its ``fail_fast`` callback) for a
+    tool call still in flight when the underlying transport reconnected after
+    seeing a 401/503 on this server. Deliberately NOT routed through
+    :func:`_handle_auth_error_and_retry` — there is no credential for
+    hermes-agent to recover here; only the caller can supply a new JWT.
+    """
+
+
 class _ForwardedJWTAuth(httpx.Auth):
     """Injects a per-request Bearer token forwarded from the API-server caller.
 
@@ -2419,6 +2430,7 @@ class MCPServerTask:
         "_registered_tool_names", "_auth_type", "_refresh_lock",
         "_rpc_lock", "_pending_refresh_tasks",
         "_pending_call_context", "_pending_mcp_jwt",
+        "_last_forward_jwt_auth_failure_at",
         "_lifecycle_started_at", "_last_tool_call_at",
         "_idle_timeout_seconds", "_max_lifetime_seconds", "_recycled_reason",
         "initialize_result", "_ping_unsupported", "_list_cache_meta",
@@ -2483,6 +2495,15 @@ class MCPServerTask:
         # _pending_call_context above, since httpx.Auth.auth_flow runs on
         # that same background loop, not the caller's thread/context.
         self._pending_mcp_jwt: Optional[str] = None
+        # Timestamp of the most recent transport-level auth rejection
+        # (401/503) seen for a forward_jwt server — set by
+        # _reconnect_or_reraise_group, read by in-flight tool calls via
+        # _run_on_mcp_loop's fail_fast callback. A forwarded JWT is caller-
+        # owned cargo: reconnecting the shared transport can never fix a bad
+        # one, so a call whose JWT was rejected must bail out immediately
+        # instead of riding out the full tool timeout waiting on a response
+        # stream that the reconnect has already orphaned.
+        self._last_forward_jwt_auth_failure_at: Optional[float] = None
         now = time.monotonic()
         self._lifecycle_started_at: float = now
         self._last_tool_call_at: float = now
@@ -3430,6 +3451,13 @@ class MCPServerTask:
             raise eg
         if not self._ready.is_set():
             raise eg
+        if self._auth_type == "forward_jwt" and _group_has_forward_jwt_auth_failure(eg):
+            # A forwarded JWT is caller-owned cargo — reconnecting the shared
+            # transport can never fix a bad one. Record when this happened so
+            # any tool call currently blocked on the (now-orphaned) old
+            # session can fail fast via _run_on_mcp_loop's fail_fast callback
+            # instead of riding out the full tool timeout.
+            self._last_forward_jwt_auth_failure_at = time.monotonic()
         logger.debug(
             "MCP server '%s': transport TaskGroup exited after a live session "
             "(%r) — reconnecting immediately instead of backing off",
@@ -4672,6 +4700,34 @@ def _signal_reconnect_and_wait(
 # Auth-failure detection helpers (Task 6 of MCP OAuth consolidation)
 # ---------------------------------------------------------------------------
 
+def _group_has_forward_jwt_auth_failure(eg: BaseExceptionGroup) -> bool:
+    """Return True if ``eg`` contains a downstream rejection of a forwarded JWT.
+
+    Used only by :meth:`MCPServerTask._reconnect_or_reraise_group` for
+    ``auth: forward_jwt`` servers — separate from :func:`_is_auth_error`,
+    which classifies exceptions on the OAuth-provider recovery path (a
+    different task, a different failure it can actually act on).
+
+    Treats both ``401`` (most forward_jwt gateways, e.g. mt-mcp-proxy) and
+    ``503`` (mt-mcp-grafana deliberately reports tools/call auth failures as
+    503 rather than 401/403, to avoid the MCP Go SDK treating a bad token as
+    fatal and permanently killing the shared session — see its
+    ``writeAuthFailure``) as signals. Response bodies are not inspected: by
+    the time this runs the transport's ``response.stream(...)`` context has
+    already exited, so ``response.text`` raises ``httpx.ResponseNotRead``.
+    A genuine 503 backend outage misclassified as an auth failure still just
+    fails a pending call fast instead of hanging it for the full tool
+    timeout — a fine tradeoff for not being able to distinguish the two.
+    """
+    http_errors, _rest = eg.split(httpx.HTTPStatusError)
+    if http_errors is None:
+        return False
+    for exc in http_errors.exceptions:
+        if getattr(exc.response, "status_code", None) in (401, 503):
+            return True
+    return False
+
+
 # Cached tuple of auth-related exception types. Lazy so this module
 # imports cleanly when the MCP SDK OAuth module is missing.
 _AUTH_ERROR_TYPES: tuple = ()
@@ -5370,7 +5426,7 @@ def _wrap_with_dashboard_oauth_flow(coro):
     return _scoped()
 
 
-def _run_on_mcp_loop(coro_or_factory, timeout: float = 30):
+def _run_on_mcp_loop(coro_or_factory, timeout: float = 30, fail_fast=None):
     """Schedule a coroutine on the MCP event loop and block until done.
 
     Accepts either a coroutine object or a zero-arg callable that returns one.
@@ -5380,6 +5436,16 @@ def _run_on_mcp_loop(coro_or_factory, timeout: float = 30):
 
     Poll in short intervals so the calling agent thread can honor user
     interrupts while the MCP work is still running on the background loop.
+
+    ``fail_fast``, if given, is a zero-arg callable checked on every poll
+    tick alongside the interrupt check. If it returns a non-``None`` string,
+    the scheduled future is cancelled and :class:`ForwardedJwtAuthError` is
+    raised with that message immediately — used by the 5 MCP tool-call
+    handlers so a call blocked on a forward_jwt server's now-orphaned
+    response stream (see ``_reconnect_or_reraise_group``) doesn't have to
+    ride out the full ``timeout`` to fail. ``None`` means "no change,
+    continue waiting normally" — this is a per-tick check, not a one-shot
+    latch, so a caller with no relevant failure never notices this exists.
     """
     from tools.interrupt import is_interrupted
     from agent.async_utils import safe_schedule_threadsafe
@@ -5420,6 +5486,12 @@ def _run_on_mcp_loop(coro_or_factory, timeout: float = 30):
         if is_interrupted():
             future.cancel()
             raise InterruptedError("User sent a new message")
+
+        if fail_fast is not None:
+            fail_fast_message = fail_fast()
+            if fail_fast_message is not None:
+                future.cancel()
+                raise ForwardedJwtAuthError(fail_fast_message)
 
         wait_timeout = 0.1
         if deadline is not None:
@@ -5818,6 +5890,33 @@ def _mark_server_call_started(server: Any) -> None:
         mark_tool_call()
 
 
+def _make_forward_jwt_fail_fast(server: Any, server_name: str, call_started_at: float):
+    """Build the ``fail_fast`` callback passed to ``_run_on_mcp_loop``.
+
+    Returns None immediately for non-forward_jwt servers (the common case),
+    so this costs nothing there. For forward_jwt servers, returns an error
+    message once ``server._last_forward_jwt_auth_failure_at`` records a
+    rejection that happened at or after ``call_started_at`` — the ``>=``
+    guard is load-bearing: without it, a stale failure from a *previous*,
+    unrelated call on this shared server would fast-fail every subsequent
+    call, even ones carrying a perfectly valid JWT.
+    """
+    if getattr(server, "_auth_type", "") != "forward_jwt":
+        return None
+
+    def _fail_fast() -> Optional[str]:
+        failed_at = server._last_forward_jwt_auth_failure_at
+        if failed_at is not None and failed_at >= call_started_at:
+            return (
+                f"MCP server '{server_name}' rejected the forwarded caller "
+                f"JWT (401/503 Unauthorized). Check X-MCP-Authorization on "
+                f"the API request."
+            )
+        return None
+
+    return _fail_fast
+
+
 def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
     """Return a sync handler that calls an MCP tool via the background loop.
 
@@ -6045,8 +6144,11 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                     return json.dumps({"result": text_result}, ensure_ascii=False)
             return json.dumps({"result": text_result}, ensure_ascii=False)
 
+        _call_started_at = time.monotonic()
+        _fail_fast = _make_forward_jwt_fail_fast(server, server_name, _call_started_at)
+
         def _call_once():
-            return _run_on_mcp_loop(_call, timeout=tool_timeout)
+            return _run_on_mcp_loop(_call, timeout=tool_timeout, fail_fast=_fail_fast)
 
         try:
             result = _call_once()
@@ -6062,6 +6164,13 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             return result
         except InterruptedError:
             return _interrupted_call_result()
+        except ForwardedJwtAuthError as exc:
+            _bump_server_error(server_name)
+            return json.dumps({
+                "error": str(exc),
+                "needs_reauth": True,
+                "server": server_name,
+            }, ensure_ascii=False)
         except Exception as exc:
             # Auth-specific recovery path: consult the manager, signal
             # reconnect if viable, retry once. Returns None to fall
@@ -6126,13 +6235,23 @@ def _make_list_resources_handler(server_name: str, tool_timeout: float):
                 resources.append(entry)
             return json.dumps({"resources": resources}, ensure_ascii=False)
 
+        _call_started_at = time.monotonic()
+        _fail_fast = _make_forward_jwt_fail_fast(server, server_name, _call_started_at)
+
         def _call_once():
-            return _run_on_mcp_loop(_call, timeout=tool_timeout)
+            return _run_on_mcp_loop(_call, timeout=tool_timeout, fail_fast=_fail_fast)
 
         try:
             return _call_once()
         except InterruptedError:
             return _interrupted_call_result()
+        except ForwardedJwtAuthError as exc:
+            _bump_server_error(server_name)
+            return json.dumps({
+                "error": str(exc),
+                "needs_reauth": True,
+                "server": server_name,
+            }, ensure_ascii=False)
         except Exception as exc:
             recovered = _handle_auth_error_and_retry(
                 server_name, exc, _call_once, "resources/list",
@@ -6187,13 +6306,23 @@ def _make_read_resource_handler(server_name: str, tool_timeout: float):
                     parts.append(rendered or f"[binary data, {len(block.blob)} bytes]")
             return json.dumps({"result": "\n".join(parts) if parts else ""}, ensure_ascii=False)
 
+        _call_started_at = time.monotonic()
+        _fail_fast = _make_forward_jwt_fail_fast(server, server_name, _call_started_at)
+
         def _call_once():
-            return _run_on_mcp_loop(_call, timeout=tool_timeout)
+            return _run_on_mcp_loop(_call, timeout=tool_timeout, fail_fast=_fail_fast)
 
         try:
             return _call_once()
         except InterruptedError:
             return _interrupted_call_result()
+        except ForwardedJwtAuthError as exc:
+            _bump_server_error(server_name)
+            return json.dumps({
+                "error": str(exc),
+                "needs_reauth": True,
+                "server": server_name,
+            }, ensure_ascii=False)
         except Exception as exc:
             recovered = _handle_auth_error_and_retry(
                 server_name, exc, _call_once, "resources/read",
@@ -6248,13 +6377,23 @@ def _make_list_prompts_handler(server_name: str, tool_timeout: float):
                 prompts.append(entry)
             return json.dumps({"prompts": prompts}, ensure_ascii=False)
 
+        _call_started_at = time.monotonic()
+        _fail_fast = _make_forward_jwt_fail_fast(server, server_name, _call_started_at)
+
         def _call_once():
-            return _run_on_mcp_loop(_call, timeout=tool_timeout)
+            return _run_on_mcp_loop(_call, timeout=tool_timeout, fail_fast=_fail_fast)
 
         try:
             return _call_once()
         except InterruptedError:
             return _interrupted_call_result()
+        except ForwardedJwtAuthError as exc:
+            _bump_server_error(server_name)
+            return json.dumps({
+                "error": str(exc),
+                "needs_reauth": True,
+                "server": server_name,
+            }, ensure_ascii=False)
         except Exception as exc:
             recovered = _handle_auth_error_and_retry(
                 server_name, exc, _call_once, "prompts/list",
@@ -6313,13 +6452,23 @@ def _make_get_prompt_handler(server_name: str, tool_timeout: float):
                 resp["description"] = result.description
             return json.dumps(resp, ensure_ascii=False)
 
+        _call_started_at = time.monotonic()
+        _fail_fast = _make_forward_jwt_fail_fast(server, server_name, _call_started_at)
+
         def _call_once():
-            return _run_on_mcp_loop(_call, timeout=tool_timeout)
+            return _run_on_mcp_loop(_call, timeout=tool_timeout, fail_fast=_fail_fast)
 
         try:
             return _call_once()
         except InterruptedError:
             return _interrupted_call_result()
+        except ForwardedJwtAuthError as exc:
+            _bump_server_error(server_name)
+            return json.dumps({
+                "error": str(exc),
+                "needs_reauth": True,
+                "server": server_name,
+            }, ensure_ascii=False)
         except Exception as exc:
             recovered = _handle_auth_error_and_retry(
                 server_name, exc, _call_once, "prompts/get",
