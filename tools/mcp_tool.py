@@ -305,6 +305,17 @@ async def _paginate_full_list(list_method, items_attr: str, server_name: str,
 
 # ---- Server task -- each MCP server lives in one long-lived asyncio Task ----
 
+class ForwardedJwtAuthError(Exception):
+    """A forward_jwt server rejected the caller's forwarded JWT.
+
+    Raised by :func:`_run_on_mcp_loop` (via its ``fail_fast`` callback) for a
+    tool call still in flight when the underlying transport reconnected after
+    seeing a 401/503 on this server. Deliberately NOT routed through
+    :func:`_handle_auth_error_and_retry` — there is no credential for
+    hermes-agent to recover here; only the caller can supply a new JWT.
+    """
+
+
 class _ForwardedJWTAuth(httpx.Auth):
     """Injects a per-request Bearer token forwarded from the API-server caller.
 
@@ -342,7 +353,7 @@ class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthM
         "name", "session", "tool_timeout", "_task", "_ready", "_shutdown_event", "_reconnect_event",
         "_tools", "_error", "_config", "_sampling", "_elicitation", "_registered_tool_names",
         "_auth_type", "_refresh_lock", "_rpc_lock", "_pending_refresh_tasks", "_pending_call_context",
-        "_pending_mcp_jwt",
+        "_pending_mcp_jwt", "_last_forward_jwt_auth_failure_at",
         "_lifecycle_started_at", "_last_tool_call_at", "_idle_timeout_seconds", "_max_lifetime_seconds",
         "_recycled_reason", "initialize_result", "_ping_unsupported", "_list_cache_meta",
         "_reconnect_retries", "_session_proven", "_was_parked", "_inflight_tasks", "_reconnecting",
@@ -414,6 +425,15 @@ class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthM
         # _pending_call_context above, since httpx.Auth.auth_flow runs on
         # that same background loop, not the caller's thread/context.
         self._pending_mcp_jwt: Optional[str] = None
+        # Timestamp of the most recent transport-level auth rejection
+        # (401/503) seen for a forward_jwt server — set by
+        # _reconnect_or_reraise_group, read by in-flight tool calls via
+        # _run_on_mcp_loop's fail_fast callback. A forwarded JWT is caller-
+        # owned cargo: reconnecting the shared transport can never fix a bad
+        # one, so a call whose JWT was rejected must bail out immediately
+        # instead of riding out the full tool timeout waiting on a response
+        # stream that the reconnect has already orphaned.
+        self._last_forward_jwt_auth_failure_at: Optional[float] = None
         self._lifecycle_started_at = self._last_tool_call_at = time.monotonic()
         self._idle_timeout_seconds = self._max_lifetime_seconds = self._recycled_reason = None
         # Handshake InitializeResult: the server's REAL advertised capabilities.

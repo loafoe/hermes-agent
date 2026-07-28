@@ -663,7 +663,7 @@ class TestToolHandler:
 
     def _patch_mcp_loop(self, coro_side_effect=None):
         """Return a patch for _run_on_mcp_loop that runs the coroutine directly."""
-        def fake_run(coro_or_factory, timeout=30):
+        def fake_run(coro_or_factory, timeout=30, fail_fast=None):
             coro = coro_or_factory() if callable(coro_or_factory) else coro_or_factory
             return asyncio.run(coro)
         if coro_side_effect:
@@ -689,7 +689,6 @@ class TestToolHandler:
             mock_session.call_tool.assert_called_once_with("greet", arguments={"name": "world"})
         finally:
             _servers.pop("test_srv", None)
-
 
     def test_recycled_stdio_server_reconnects_lazily_on_tool_call(self):
         from tools.mcp_tool_handlers import _make_tool_handler
@@ -1704,7 +1703,7 @@ class TestConfigurableTimeouts:
         try:
             handler = _make_tool_handler("test_srv", "my_tool", 180)
             with patch("tools.mcp_tool_loop._run_on_mcp_loop") as mock_run:
-                def fake_run(coro, timeout=30):
+                def fake_run(coro, timeout=30, fail_fast=None):
                     coro.close()
                     return json.dumps({"result": "ok"})
 
@@ -1756,7 +1755,7 @@ class TestUtilityHandlers:
 
     def _patch_mcp_loop(self):
         """Return a patch for _run_on_mcp_loop that runs the coroutine directly."""
-        def fake_run(coro_or_factory, timeout=30):
+        def fake_run(coro_or_factory, timeout=30, fail_fast=None):
             coro = coro_or_factory() if callable(coro_or_factory) else coro_or_factory
             return asyncio.run(coro)
         return patch("tools.mcp_tool_loop._run_on_mcp_loop", side_effect=fake_run)

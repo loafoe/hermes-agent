@@ -226,23 +226,63 @@ def _handle_stdio_child_exited_and_retry(server_name: str, exc: Exception, retry
             f"{type(retry_exc).__name__}: {_exc_str(retry_exc)}"))
 
 
+def _make_forward_jwt_fail_fast(server: Any, server_name: str, call_started_at: float):
+    """Build the ``fail_fast`` callback passed to ``_run_on_mcp_loop``.
+
+    Returns None immediately for non-forward_jwt servers (the common case), so this costs nothing
+    there. For forward_jwt servers, returns an error message once
+    ``server._last_forward_jwt_auth_failure_at`` records a rejection that happened at or after
+    ``call_started_at`` — the ``>=`` guard is load-bearing: without it, a stale failure from a
+    *previous*, unrelated call on this shared server would fast-fail every subsequent call, even
+    ones carrying a perfectly valid JWT.
+    """
+    if getattr(server, "_auth_type", "") != "forward_jwt":
+        return None
+
+    def _fail_fast() -> Optional[str]:
+        failed_at = server._last_forward_jwt_auth_failure_at
+        if failed_at is not None and failed_at >= call_started_at:
+            return (
+                f"MCP server '{server_name}' rejected the forwarded caller "
+                f"JWT (401/503 Unauthorized). Check X-MCP-Authorization on "
+                f"the API request."
+            )
+        return None
+
+    return _fail_fast
+
+
 def _dispatch(server_name: str, server: Any, op: str, call, tool_timeout: float, recoverers,
               on_final_failure: Callable[[BaseException], None], record_outcome: bool = False) -> str:
     """Mark the call started on *server* (doubles may lack ``mark_tool_call``), run coroutine function *call*
     on the MCP loop and, on failure, walk ``recoverers`` (``(server_name, exc, retry_call, op) -> Optional[str]``,
     None = not its kind; order matters). Unrecovered exceptions go through ``on_final_failure`` and become the
-    generic call-failed error. ``record_outcome`` applies breaker bookkeeping to the FIRST attempt only."""
+    generic call-failed error. ``record_outcome`` applies breaker bookkeeping to the FIRST attempt only.
+
+    A forward_jwt server whose forwarded JWT was rejected (401/503) fails fast via
+    ``ForwardedJwtAuthError`` instead of riding out the full ``tool_timeout`` — see
+    ``_make_forward_jwt_fail_fast`` and ``MCPServerTransportMixin._reconnect_or_reraise_group``."""
     if callable(getattr(server, "mark_tool_call", None)):
         server.mark_tool_call()
 
+    _call_started_at = time.monotonic()
+    _fail_fast = _make_forward_jwt_fail_fast(server, server_name, _call_started_at)
+
     def call_once():
-        return _loop._run_on_mcp_loop(call, timeout=tool_timeout)
+        return _loop._run_on_mcp_loop(call, timeout=tool_timeout, fail_fast=_fail_fast)
 
     try:
         result = call_once()
         return _record_call_outcome(server_name, result) if record_outcome else result
     except InterruptedError:
         return tool_error("MCP call interrupted: user sent a new message")
+    except _core.ForwardedJwtAuthError as exc:
+        _core._bump_server_error(server_name)
+        return json.dumps({
+            "error": str(exc),
+            "needs_reauth": True,
+            "server": server_name,
+        }, ensure_ascii=False)
     except Exception as exc:
         for recover in recoverers:
             recovered = recover(server_name, exc, call_once, op)

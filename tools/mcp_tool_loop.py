@@ -139,9 +139,18 @@ def _running_loop() -> Optional[asyncio.AbstractEventLoop]:
     return loop if loop is not None and loop.is_running() else None
 
 
-def _run_on_mcp_loop(coro_or_factory, timeout: float = 30):
+def _run_on_mcp_loop(coro_or_factory, timeout: float = 30, fail_fast=None):
     """Schedule a coroutine (or zero-arg factory — avoids leaking a never-awaited coroutine when the
-    loop is down) on the MCP loop and block until done, polling so user interrupts are honored."""
+    loop is down) on the MCP loop and block until done, polling so user interrupts are honored.
+
+    ``fail_fast``, if given, is a zero-arg callable checked on every poll tick alongside the
+    interrupt check. If it returns a non-``None`` string, the scheduled future is cancelled and
+    :class:`tools.mcp_tool.ForwardedJwtAuthError` is raised with that message immediately — used
+    by the MCP tool-call handlers so a call blocked on a forward_jwt server's now-orphaned response
+    stream (see ``MCPServerTransportMixin._reconnect_or_reraise_group``) doesn't have to ride out
+    the full ``timeout`` to fail. ``None`` means "no change, continue waiting normally" — this is a
+    per-tick check, not a one-shot latch, so a caller with no relevant failure never notices this
+    exists."""
     from tools.interrupt import is_interrupted
     from agent.async_utils import safe_schedule_threadsafe
 
@@ -163,6 +172,12 @@ def _run_on_mcp_loop(coro_or_factory, timeout: float = 30):
         if is_interrupted():
             future.cancel()
             raise InterruptedError("User sent a new message")
+        if fail_fast is not None:
+            fail_fast_message = fail_fast()
+            if fail_fast_message is not None:
+                future.cancel()
+                from tools.mcp_tool import ForwardedJwtAuthError
+                raise ForwardedJwtAuthError(fail_fast_message)
         remaining = 0.1 if deadline is None else deadline - time.monotonic()
         if remaining <= 0:
             future.cancel()

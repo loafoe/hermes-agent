@@ -5,8 +5,11 @@ protocol negotiation and initial tool discovery. Split from tools/mcp_tool.py.""
 import logging
 import asyncio
 import os
+import time
 from contextlib import asynccontextmanager
 from typing import Dict, Optional, Set
+
+import httpx
 from tools.mcp_tool_errors import NonMcpEndpointError, _apply_identity_header, _handshake_rejected_as_modern, _make_redirect_header_stripper, _resolve_client_cert
 from tools.mcp_tool_lifecycle import _filter_mcp_children, _orphan_stdio_pid_servers, _orphan_stdio_pids, _stdio_pgids, _stdio_pids
 from tools.mcp_tool_common import _core
@@ -42,6 +45,34 @@ def _pgroup_alive(pgid: Optional[int]) -> bool:
         return True
     except (AttributeError, TypeError, OSError):  # non-POSIX / pgid None / gone
         return False
+
+
+def _group_has_forward_jwt_auth_failure(eg: BaseExceptionGroup) -> bool:
+    """Return True if ``eg`` contains a downstream rejection of a forwarded JWT.
+
+    Used only by :meth:`MCPServerTransportMixin._reconnect_or_reraise_group` for
+    ``auth: forward_jwt`` servers — separate from :func:`tools.mcp_tool_errors._is_auth_error`,
+    which classifies exceptions on the OAuth-provider recovery path (a
+    different task, a different failure it can actually act on).
+
+    Treats both ``401`` (most forward_jwt gateways, e.g. mt-mcp-proxy) and
+    ``503`` (mt-mcp-grafana deliberately reports tools/call auth failures as
+    503 rather than 401/403, to avoid the MCP Go SDK treating a bad token as
+    fatal and permanently killing the shared session — see its
+    ``writeAuthFailure``) as signals. Response bodies are not inspected: by
+    the time this runs the transport's ``response.stream(...)`` context has
+    already exited, so ``response.text`` raises ``httpx.ResponseNotRead``.
+    A genuine 503 backend outage misclassified as an auth failure still just
+    fails a pending call fast instead of hanging it for the full tool
+    timeout — a fine tradeoff for not being able to distinguish the two.
+    """
+    http_errors, _rest = eg.split(httpx.HTTPStatusError)
+    if http_errors is None:
+        return False
+    for exc in http_errors.exceptions:
+        if getattr(exc.response, "status_code", None) in (401, 503):
+            return True
+    return False
 
 
 class MCPServerTransportMixin:
@@ -320,6 +351,13 @@ class MCPServerTransportMixin:
                 or eg.split(asyncio.CancelledError)[0] is not None
                 or not self._ready.is_set()):
             raise eg
+        if self._auth_type == "forward_jwt" and _group_has_forward_jwt_auth_failure(eg):
+            # A forwarded JWT is caller-owned cargo — reconnecting the shared
+            # transport can never fix a bad one. Record when this happened so
+            # any tool call currently blocked on the (now-orphaned) old
+            # session can fail fast via _run_on_mcp_loop's fail_fast callback
+            # instead of riding out the full tool timeout.
+            self._last_forward_jwt_auth_failure_at = time.monotonic()
         logger.debug("MCP server '%s': transport TaskGroup exited after a live session "
                      "(%r) — reconnecting immediately instead of backing off", self.name, eg)
         return "reconnect"
