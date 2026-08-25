@@ -220,6 +220,7 @@ def test_run_http_new_http_path_installs_forwarded_jwt_auth(tmp_path):
     async def _drive():
         with patch("tools.mcp_tool._MCP_HTTP_AVAILABLE", True), \
              patch("tools.mcp_tool._MCP_NEW_HTTP", True), \
+             patch("tools.mcp_tool.sdk_httpx", return_value=httpx), \
              patch("httpx.AsyncClient", DummyAsyncClient), \
              patch("tools.mcp_tool.streamable_http_client",
                    return_value=DummyTransportCtx()), \

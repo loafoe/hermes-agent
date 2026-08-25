@@ -2384,7 +2384,7 @@ class ForwardedJwtAuthError(Exception):
     """
 
 
-class _ForwardedJWTAuth(httpx.Auth):
+class _ForwardedJWTAuth((sdk_httpx() or httpx).Auth):
     """Injects a per-request Bearer token forwarded from the API-server caller.
 
     Structurally parallel to HermesMCPOAuthProvider
@@ -2394,6 +2394,13 @@ class _ForwardedJWTAuth(httpx.Auth):
     servers install this (tools/mcp_tool.py's ``_run_http``); it forwards
     whatever the caller supplied via ``X-MCP-Authorization`` on the
     inbound API-server request, unvalidated.
+
+    Must subclass the SDK's own ``Auth`` base (``httpx2`` on mcp >= 2.0,
+    see ``sdk_httpx()``), not Hermes' separately-pinned ``httpx`` — the
+    AsyncClient built in ``_run_http`` validates ``auth=`` with
+    ``isinstance(auth, Auth)`` against its own module's class, and the two
+    distributions' ``Auth`` classes are not interchangeable despite the
+    identical API.
 
     httpx.Auth.auth_flow is a plain (non-async) generator; httpx accepts a
     sync auth_flow transparently even on an async client (unlike

@@ -19,6 +19,7 @@ that make it fail fast instead:
 import asyncio
 import json
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import httpx
@@ -199,7 +200,7 @@ def test_call_tool_handler_fast_fails_on_forward_jwt_rejection(monkeypatch, tmp_
         # Simulates the real bug: the call is blocked on an orphaned response
         # stream that never resolves on its own within the test's patience.
         await asyncio.sleep(30)
-        return MagicMock(isError=False, content=[], structuredContent=None)
+        return SimpleNamespace(isError=False, content=[], structuredContent=None)
 
     session.call_tool = _call_tool_hangs
     server.session = session
@@ -245,7 +246,7 @@ def test_call_tool_handler_forward_jwt_server_without_failure_uses_normal_path(m
     session = MagicMock()
 
     async def _call_tool_ok(*a, **kw):
-        return MagicMock(isError=False, content=[], structuredContent=None)
+        return SimpleNamespace(isError=False, content=[], structuredContent=None)
 
     session.call_tool = _call_tool_ok
     server.session = session
