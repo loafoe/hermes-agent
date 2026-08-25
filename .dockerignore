@@ -3,6 +3,10 @@
 .gitignore
 .gitmodules
 
+# Local git worktrees for isolated feature work — full checkouts of other
+# branches (each with its own .venv/node_modules), never needed in the image.
+.worktrees/
+
 # Python
 __pycache__
 *.py[cod]
