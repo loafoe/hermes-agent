@@ -38,7 +38,7 @@ needs to replace the import + call site:
 
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any, Iterator
+from typing import Any, Iterator, Optional
 
 # Sentinel to distinguish "never set in this context" from "explicitly set to empty".
 # When a contextvar holds _UNSET, we fall back to os.environ (CLI/cron compat).
@@ -114,6 +114,15 @@ _BROWSER_CONTROL_TRANSPORT_FAMILY: ContextVar = ContextVar(
 # fallback for CLI/tests; "1" marks cron; "" explicitly marks non-cron and
 # masks any leaked process env value.
 _CRON_SESSION: ContextVar = ContextVar("HERMES_CRON_SESSION", default=_UNSET)
+
+# JWT forwarded from an API-server caller's X-MCP-Authorization header, to
+# be injected into outgoing MCP tool calls for servers configured with
+# auth: forward_jwt (see tools/mcp_tool.py's _ForwardedJWTAuth). Unlike
+# every other var in _VAR_MAP, this one is read via get_session_mcp_jwt(),
+# NOT get_session_env() — it must never fall back to os.environ, since a
+# stale process-global env var leaking a JWT across concurrent sessions
+# would be a credential-confusion bug, not just a routing bug.
+_SESSION_MCP_JWT: ContextVar = ContextVar("HERMES_SESSION_MCP_JWT", default=_UNSET)
 
 # Whether the current session's delivery channel can route an ASYNC completion
 # back to the agent AFTER the current turn ends (i.e. wake a fresh turn).
@@ -242,6 +251,7 @@ def set_session_vars(
     async_delivery: bool = True,
     ui_session_id: str = "",
     cron_session: Any = _UNSET,
+    mcp_jwt: str = "",
 ) -> list:
     """Set all session context variables and return reset tokens.
 
@@ -287,6 +297,7 @@ def set_session_vars(
         _BROWSER_CONTROL_TRANSPORT_FAMILY.set(browser_control_transport_family),
         _CRON_SESSION.set(cron_session),
         _SESSION_ASYNC_DELIVERY.set(bool(async_delivery)),
+        _SESSION_MCP_JWT.set(mcp_jwt),
     ]
     try:
         from agent.runtime_cwd import set_session_cwd
@@ -327,6 +338,7 @@ def clear_session_vars(tokens: list) -> None:
         _BROWSER_CONTROL_PRINCIPAL,
         _BROWSER_CONTROL_TRANSPORT_FAMILY,
         _CRON_SESSION,
+        _SESSION_MCP_JWT,
     ):
         var.set("")
     # Reset async-delivery capability to the "never set" sentinel rather than a
@@ -382,6 +394,7 @@ def reset_session_vars() -> None:
     # same inheritance-leak reason as the mapped vars above — see clear_session_vars,
     # which resets this var on the handler-exit path for the symmetric concern.
     _SESSION_ASYNC_DELIVERY.set(_UNSET)
+    _SESSION_MCP_JWT.set(_UNSET)
     try:
         from agent.runtime_cwd import clear_session_cwd
 
@@ -491,6 +504,20 @@ def declare_stateless_channel() -> None:
     See NousResearch/hermes-agent#53027 and #63142.
     """
     _SESSION_ASYNC_DELIVERY.set(False)
+
+
+def get_session_mcp_jwt() -> Optional[str]:
+    """Read the JWT forwarded from the current API-server caller, if any.
+
+    Unlike get_session_env(), this NEVER falls back to os.environ — a
+    forwarded credential must not leak across sessions via a stale
+    process-global env var. Returns None when unset or explicitly cleared
+    (empty string).
+    """
+    value = _SESSION_MCP_JWT.get()
+    if value is _UNSET or not value:
+        return None
+    return value
 
 
 def async_delivery_supported() -> bool:

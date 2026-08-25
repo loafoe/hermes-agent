@@ -589,6 +589,7 @@ def init_agent(
     checkpoint_max_file_size_mb: int = 10,
     pass_session_id: bool = False,
     requested_provider: str = None,
+    forwarded_caller_jwt: bool = False,
 ):
     """
     Initialize the AI Agent.
@@ -1132,6 +1133,8 @@ def init_agent(
     # router-based implicit auth) can apply it consistently.  Bedrock
     # Claude uses its own timeout path and is not covered here.
     _provider_timeout = get_provider_request_timeout(agent.provider, agent.model)
+
+    agent._forwarded_caller_jwt_in_use = bool(forwarded_caller_jwt)
 
     if agent.api_mode == "anthropic_messages":
         from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token

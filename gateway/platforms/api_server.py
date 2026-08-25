@@ -1972,6 +1972,26 @@ class APIServerAdapter(BasePlatformAdapter):
             status=401,
         )
 
+    def _extract_forwarded_mcp_jwt(self, request: "web.Request") -> Optional[str]:
+        """Extract the caller-supplied JWT to forward to MCP servers.
+
+        Returns None if absent. Not validated or decoded — hermes-agent is
+        a pure forwarder here, matching picoclaw's trust model: the JWT is
+        opaque cargo, and it is the downstream MCP server's job to verify
+        it. Independent of _check_auth — this header can be present or
+        absent regardless of whether the gateway's own API-key auth
+        passes or fails; it is up to the caller to also satisfy
+        _check_auth via the ordinary Authorization header.
+        """
+        raw = request.headers.get("X-MCP-Authorization", "").strip()
+        if not raw:
+            return None
+        if raw.startswith("Bearer "):
+            raw = raw[7:].strip()
+        if not raw or re.search(r'[\r\n\x00]', raw):
+            return None
+        return raw
+
     @staticmethod
     def _normalize_callback_platform(value: str) -> str:
         normalized = (value or "").strip().lower().replace("-", "_")
@@ -2342,6 +2362,33 @@ class APIServerAdapter(BasePlatformAdapter):
 
         return raw, None
 
+    def _extract_forwarded_llm_jwt(self, request: "web.Request") -> Optional[str]:
+        """Extract the caller-supplied JWT to forward to the LLM provider.
+
+        Returns None if absent. Not validated or decoded — hermes-agent is
+        a pure forwarder here: the JWT is opaque cargo, and it is the
+        downstream LLM provider's job to verify it. Independent of
+        _check_auth — this header can be present or absent regardless of
+        whether the gateway's own API-key auth passes or fails; it is up
+        to the caller to also satisfy _check_auth via the ordinary
+        Authorization header.
+
+        Deliberately a distinct header from ``X-MCP-Authorization`` (used
+        by the separate MCP-JWT-forwarding feature to authorize outgoing
+        MCP tool calls) — the two forward a caller's JWT to different
+        trust boundaries (LLM provider vs. MCP server) and are configured
+        independently. A caller that wants the same token forwarded to
+        both sends both headers.
+        """
+        raw = request.headers.get("X-LLM-Authorization", "").strip()
+        if not raw:
+            return None
+        if raw.startswith("Bearer "):
+            raw = raw[7:].strip()
+        if not raw or re.search(r'[\r\n\x00]', raw):
+            return None
+        return raw
+
     # ------------------------------------------------------------------
     # Session DB helper
     # ------------------------------------------------------------------
@@ -2446,9 +2493,13 @@ class APIServerAdapter(BasePlatformAdapter):
     def _parse_model_routes(raw: Any) -> Dict[str, Dict[str, Any]]:
         """Validate and normalize the ``model_routes`` config block.
 
-        Accepts a mapping of ``alias -> {model, provider?, api_key?, base_url?}``.
-        Invalid shapes are dropped (never raised) so a config typo can't take
-        the whole API server down.  Route values are coerced to strings.
+        Accepts a mapping of ``alias -> {model, provider?, api_key?, base_url?,
+        forward_caller_jwt?}``. Invalid shapes are dropped (never raised) so a
+        config typo can't take the whole API server down.  String route
+        values are coerced to strings; ``forward_caller_jwt`` is coerced to
+        bool via YAML-boolean-string normalization (accepts ``true``/``yes``/
+        ``1``/``on``, case-insensitive, matching the rest of the config
+        schema's boolean handling elsewhere in the codebase).
 
         Security: per-route ``api_key`` values are UPSTREAM provider
         credentials (used to call the routed model's backend), not caller
@@ -2456,6 +2507,10 @@ class APIServerAdapter(BasePlatformAdapter):
         API_SERVER_KEY bearer token via ``_check_auth``.  Route api_keys must
         never be logged; only alias names and non-secret fields may appear in
         logs.
+
+        ``forward_caller_jwt: true`` means this route's upstream call uses the
+        caller's own X-LLM-Authorization JWT as the Bearer credential INSTEAD
+        OF ``api_key`` (full replace, not additive) — see ``_create_agent``.
         """
         if not isinstance(raw, dict):
             if raw:
@@ -2479,6 +2534,14 @@ class APIServerAdapter(BasePlatformAdapter):
                 for key in allowed_keys
                 if cfg.get(key) is not None and str(cfg[key]).strip()
             }
+            if cfg.get("forward_caller_jwt") is not None:
+                raw_flag = cfg["forward_caller_jwt"]
+                if isinstance(raw_flag, bool):
+                    flag = raw_flag
+                else:
+                    flag = str(raw_flag).strip().lower() in ("true", "yes", "1", "on")
+                if flag:
+                    route["forward_caller_jwt"] = True
             if not route.get("model"):
                 logger.warning(
                     "api_server model_routes: route %r has no 'model'; dropping", alias_str
@@ -2826,6 +2889,7 @@ class APIServerAdapter(BasePlatformAdapter):
         route: Optional[Dict[str, Any]] = None,
         session_model: Optional[str] = None,
         confirmed_runtime_lock: bool = False,
+        forwarded_llm_jwt: Optional[str] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -2859,6 +2923,14 @@ class APIServerAdapter(BasePlatformAdapter):
         session ``/model`` override, disables the global fallback model
         chain, and fails closed if the locked provider's credentials cannot
         be resolved.
+
+        When the matched route also sets ``forward_caller_jwt: true`` and this
+        request carried an ``X-LLM-Authorization`` header, the caller's JWT
+        replaces ``api_key`` entirely for this agent's primary LLM client —
+        see the block immediately after route application below. This does
+        NOT affect auxiliary/fallback clients (compression, vision,
+        title-generation), which continue using the route's/global static
+        credential — see Task 3.
         """
         from run_agent import AIAgent
         from gateway.run import (
@@ -3031,6 +3103,20 @@ class APIServerAdapter(BasePlatformAdapter):
                 runtime_kwargs["api_key"] = route_api_key
             if route_base_url:
                 runtime_kwargs["base_url"] = route_base_url
+            if route and route.get("forward_caller_jwt") and forwarded_llm_jwt:
+                # Full replace, not additive: the caller's own JWT becomes
+                # the ONLY Bearer credential sent to this route's provider.
+                # Never log the JWT value itself (same rule as api_key above).
+                # ``forwarded_caller_jwt=True`` flows through **runtime_kwargs
+                # into AIAgent(...) below, so agent_init.py can mark the agent
+                # and Task 3 can keep this credential out of aux/fallback
+                # clients built later in the session.
+                runtime_kwargs["api_key"] = forwarded_llm_jwt
+                runtime_kwargs["forwarded_caller_jwt"] = True
+                logger.debug(
+                    "api_server model route %s: forwarding caller JWT as provider credential",
+                    model,
+                )
             if route:
                 logger.debug(
                     "api_server request selection applied: model=%s provider=%s route_provider=%s request_provider=%s",
@@ -4604,6 +4690,8 @@ class APIServerAdapter(BasePlatformAdapter):
         gateway_session_key, key_err = self._parse_session_key_header(request)
         if key_err is not None:
             return key_err
+        forwarded_mcp_jwt = self._extract_forwarded_mcp_jwt(request)
+        forwarded_llm_jwt = self._extract_forwarded_llm_jwt(request)
         session_id = request.match_info["session_id"]
         session, err = await self._get_existing_session_or_404(session_id)
         if err:
@@ -4680,6 +4768,8 @@ class APIServerAdapter(BasePlatformAdapter):
             requested_runtime=runtime_request.get("requested") or {},
             route_source=runtime_request.get("route_source") or "global",
             confirmed_runtime_lock=lock_active,
+            forwarded_mcp_jwt=forwarded_mcp_jwt,
+            forwarded_llm_jwt=forwarded_llm_jwt,
             **agent_overrides,
         )
         effective_session_id = result.get("session_id") if isinstance(result, dict) else session_id
@@ -4721,6 +4811,8 @@ class APIServerAdapter(BasePlatformAdapter):
         gateway_session_key, key_err = self._parse_session_key_header(request)
         if key_err is not None:
             return key_err
+        forwarded_mcp_jwt = self._extract_forwarded_mcp_jwt(request)
+        forwarded_llm_jwt = self._extract_forwarded_llm_jwt(request)
         session_id = request.match_info["session_id"]
         session, err = await self._get_existing_session_or_404(session_id)
         if err:
@@ -4853,6 +4945,8 @@ class APIServerAdapter(BasePlatformAdapter):
                     requested_runtime=runtime_request.get("requested") or {},
                     route_source=runtime_request.get("route_source") or "global",
                     confirmed_runtime_lock=lock_active,
+                    forwarded_mcp_jwt=forwarded_mcp_jwt,
+                    forwarded_llm_jwt=forwarded_llm_jwt,
                     **agent_overrides,
                 )
                 final_response = _resolve_media_to_data_urls(result.get("final_response", "") if isinstance(result, dict) else "")
@@ -5104,6 +5198,8 @@ class APIServerAdapter(BasePlatformAdapter):
         gateway_session_key, key_err = self._parse_session_key_header(request)
         if key_err is not None:
             return key_err
+        forwarded_mcp_jwt = self._extract_forwarded_mcp_jwt(request)
+        forwarded_llm_jwt = self._extract_forwarded_llm_jwt(request)
 
         # Allow caller to continue an existing session by passing X-Hermes-Session-Id.
         # When provided, history is loaded from state.db instead of from the request body.
@@ -5272,6 +5368,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 gateway_session_key=gateway_session_key,
                 **agent_overrides,
                 route=route,
+                forwarded_mcp_jwt=forwarded_mcp_jwt,
+                forwarded_llm_jwt=forwarded_llm_jwt,
             ))
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
@@ -5293,6 +5391,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 gateway_session_key=gateway_session_key,
                 **agent_overrides,
                 route=route,
+                forwarded_mcp_jwt=forwarded_mcp_jwt,
+                forwarded_llm_jwt=forwarded_llm_jwt,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -6212,6 +6312,8 @@ class APIServerAdapter(BasePlatformAdapter):
         gateway_session_key, key_err = self._parse_session_key_header(request)
         if key_err is not None:
             return key_err
+        forwarded_mcp_jwt = self._extract_forwarded_mcp_jwt(request)
+        forwarded_llm_jwt = self._extract_forwarded_llm_jwt(request)
 
         # Parse request body
         try:
@@ -6383,6 +6485,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 gateway_session_key=gateway_session_key,
                 **agent_overrides,
                 route=route,
+                forwarded_mcp_jwt=forwarded_mcp_jwt,
+                forwarded_llm_jwt=forwarded_llm_jwt,
             ))
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
@@ -6418,6 +6522,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 gateway_session_key=gateway_session_key,
                 **agent_overrides,
                 route=route,
+                forwarded_mcp_jwt=forwarded_mcp_jwt,
+                forwarded_llm_jwt=forwarded_llm_jwt,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -7168,6 +7274,7 @@ class APIServerAdapter(BasePlatformAdapter):
         session_id: str = "",
         browser_control_principal: str = "",
         browser_control_transport_family: str = "",
+        mcp_jwt: str = "",
     ) -> list:
         """Bind session contextvars for an API-server agent run.
 
@@ -7178,6 +7285,11 @@ class APIServerAdapter(BasePlatformAdapter):
         forgetting to mark the channel as non-delivering. There is no
         ``async_delivery`` parameter to get wrong; the stateless HTTP path can
         never wake the agent after the turn ends, on ANY route.
+
+        ``mcp_jwt`` is the caller's X-MCP-Authorization value (see
+        _extract_forwarded_mcp_jwt), forwarded to MCP servers configured
+        with ``auth: forward_jwt``. Empty string (the default) means no
+        JWT was supplied — get_session_mcp_jwt() returns None in that case.
 
         Returns reset tokens; pass them to ``clear_session_vars`` in a
         ``finally`` block (the binding is request-scoped and must not outlive
@@ -7195,6 +7307,7 @@ class APIServerAdapter(BasePlatformAdapter):
             browser_control_transport_family=browser_control_transport_family,
             async_delivery=False,
             cron_session="",
+            mcp_jwt=mcp_jwt,
         )
 
     async def _run_agent(
@@ -7218,6 +7331,8 @@ class APIServerAdapter(BasePlatformAdapter):
         requested_runtime: Optional[Dict[str, Any]] = None,
         route_source: str = "global",
         confirmed_runtime_lock: bool = False,
+        forwarded_mcp_jwt: Optional[str] = None,
+        forwarded_llm_jwt: Optional[str] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -7272,6 +7387,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     browser_control_transport_family=(
                         request_browser_control_transport_family
                     ),
+                    mcp_jwt=forwarded_mcp_jwt or "",
                 )
                 agent = None
                 try:
@@ -7289,6 +7405,7 @@ class APIServerAdapter(BasePlatformAdapter):
                         route=route,
                         session_model=session_model,
                         confirmed_runtime_lock=confirmed_runtime_lock,
+                        forwarded_llm_jwt=forwarded_llm_jwt,
                     )
                     if agent_ref is not None:
                         agent_ref[0] = agent
@@ -7575,6 +7692,8 @@ class APIServerAdapter(BasePlatformAdapter):
         gateway_session_key, key_err = self._parse_session_key_header(request)
         if key_err is not None:
             return key_err
+        forwarded_mcp_jwt = self._extract_forwarded_mcp_jwt(request)
+        forwarded_llm_jwt = self._extract_forwarded_llm_jwt(request)
 
         # Enforce concurrency limit (shared across all agent-serving
         # endpoints; configurable via gateway.api_server.max_concurrent_runs).
@@ -7738,6 +7857,7 @@ class APIServerAdapter(BasePlatformAdapter):
                         requested_provider=agent_overrides.get("requested_provider"),
                         model_options=agent_overrides.get("model_options"),
                         route=route,
+                        forwarded_llm_jwt=forwarded_llm_jwt,
                     )
                 self._active_run_agents[run_id] = agent
 
@@ -7807,6 +7927,7 @@ class APIServerAdapter(BasePlatformAdapter):
                                 browser_control_transport_family=(
                                     request_browser_control_transport_family
                                 ),
+                                mcp_jwt=forwarded_mcp_jwt or "",
                             )
                             register_gateway_notify(approval_session_key, _approval_notify)
                             # /v1/runs runs its own agent lifecycle (no

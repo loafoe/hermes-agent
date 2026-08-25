@@ -528,7 +528,18 @@ def build_turn_context(
             getattr(agent, "model", "") or "",
             requested_provider=getattr(agent, "requested_provider", "") or "",
             base_url=getattr(agent, "base_url", "") or "",
-            api_key=getattr(agent, "api_key", "") or "",
+            # A caller-forwarded JWT (agent-jwt-forwarding, Task 2) is scoped
+            # to this turn's PRIMARY chat call only — never publish it into
+            # the main-runtime context aux/fallback clients read back via
+            # _normalize_main_runtime(), or compression/vision/title-gen
+            # calls would silently start sending the end user's own JWT as
+            # their Bearer credential too. See docs/superpowers/plans/
+            # 2026-07-25-llm-jwt-forwarding.md Task 3.
+            api_key=(
+                ""
+                if getattr(agent, "_forwarded_caller_jwt_in_use", False)
+                else (getattr(agent, "api_key", "") or "")
+            ),
             api_mode=getattr(agent, "api_mode", "") or "",
             auth_mode=getattr(agent, "auth_mode", "") or "",
             session_id=getattr(agent, "session_id", "") or "",
