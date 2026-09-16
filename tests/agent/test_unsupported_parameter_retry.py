@@ -38,6 +38,9 @@ class TestIsUnsupportedParameterError:
         ("temperature", "An error occurred (ValidationException) when calling the Converse operation: "
                         "This model doesn't support the temperature field. Remove temperature and try again."),
         ("temperature", "ValidationException: `temperature` is deprecated for this model."),
+        # curly-apostrophe contraction (issue: agentgateway/gpt-5.6-luna) — slipped past the
+        # straight-apostrophe marker above
+        ("temperature", "This model doesn’t support the temperature field. Remove temperature and try again."),
         # max_tokens phrasings
         ("max_tokens", "HTTP 400: Unsupported parameter: max_tokens"),
         ("max_tokens", "Unknown parameter: max_tokens — use max_completion_tokens"),

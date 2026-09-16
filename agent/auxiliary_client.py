@@ -3227,7 +3227,7 @@ def _is_unsupported_parameter_error(exc: Exception, param: str) -> bool:
     # with "`temperature` is deprecated for this model" (#111043).
     return param_lower in err_lower and _contains_any(err_lower, (
         "unsupported parameter", "unsupported_parameter", "not supported", "does not support",
-        "doesn't support", "is deprecated for this model",
+        "doesn't support", "doesn’t support", "is deprecated for this model",
         "unknown parameter", "unrecognized request argument", "unrecognized parameter", "invalid parameter",
         # Strict pydantic-validated gateways (Fireworks) name the unknown field this way (#109774).
         "extra inputs are not permitted",
