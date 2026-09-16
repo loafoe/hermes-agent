@@ -495,7 +495,7 @@ _REASONING_MANDATORY_PATTERN = "reasoning is mandatory"
 # (``agent.auxiliary_client._is_unsupported_parameter_error``).
 UNSUPPORTED_PARAM_MARKERS = (
     "unsupported parameter", "unsupported_parameter", "not supported", "does not support",
-    "doesn't support", "is deprecated for this model",
+    "doesn't support", "doesn’t support", "is deprecated for this model",
     "unknown parameter", "unrecognized request argument", "unrecognized parameter",
     "invalid parameter", "extra inputs are not permitted",
     "invalid option: expected one of",
