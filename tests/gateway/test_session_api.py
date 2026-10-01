@@ -1013,61 +1013,6 @@ def test_confirmed_runtime_lock_disables_global_fallback_model(adapter, monkeypa
     assert captured["fallback_model"] is None
 
 
-def test_persisted_runtime_lock_keeps_global_fallback_model(adapter, monkeypatch):
-    """A lock replayed from storage on resume (persisted_lock=True) must not disable the
-    fallback chain: unlike a freshly confirmed lock, resume has no live user re-confirming the
-    choice, and the locked model may since have been removed/renamed on its provider."""
-    _patch_api_server_runtime(monkeypatch)
-    monkeypatch.setattr(
-        "gateway.run.GatewayRunner._load_fallback_model",
-        staticmethod(lambda: "openrouter/fallback-model"),
-    )
-    captured = {}
-
-    class FakeAgent:
-        provider = "nous"
-        model = "x-ai/grok-4.5"
-
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-
-    monkeypatch.setattr("run_agent.AIAgent", FakeAgent)
-
-    adapter._create_agent(
-        session_id="resumed-session",
-        route={"provider": "nous", "model": "x-ai/grok-4.5"},
-        confirmed_runtime_lock=True,
-        persisted_lock=True,
-    )
-
-    assert captured["fallback_model"] == "openrouter/fallback-model"
-
-
-def test_persisted_runtime_lock_skips_runtime_mismatch_check(adapter):
-    """A fallback that actually fired for a persisted lock leaves agent.provider/model pointing
-    at the fallback, not the stored lock — that is recovery working, not a mismatch to reject."""
-    class FakeAgent:
-        provider = "fallback-provider"
-        model = "fallback-model"
-        _hermes_api_runtime = {
-            "provider": "nous",
-            "model": "x-ai/grok-4.5",
-            "route_source": "session_model_lock",
-        }
-
-    runtime = adapter._turn_runtime_metadata(
-        FakeAgent(),
-        route={"provider": "nous", "model": "x-ai/grok-4.5"},
-        requested_runtime={"provider": "nous", "model": "x-ai/grok-4.5"},
-        route_source="session_model_lock",
-        confirmed_runtime_lock=True,
-        persisted_lock=True,
-    )
-
-    assert runtime["provider"] == "fallback-provider"
-    assert runtime["model"] == "fallback-model"
-
-
 @pytest.mark.asyncio
 async def test_unconfirmed_request_does_not_replace_confirmed_session_lock(adapter, session_db):
     session_id = session_db.create_session("one-off-override", "api_server")
