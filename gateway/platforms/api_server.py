@@ -2437,13 +2437,18 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         requested_model: Optional[str] = None, requested_provider: Optional[str] = None,
         model_options: Optional[Dict[str, Any]] = None, route: Optional[Dict[str, Any]] = None,
         session_model: Optional[str] = None, confirmed_runtime_lock: bool = False,
+        persisted_lock: bool = False,
         room_dispatch: Optional[Dict[str, Any]] = None,
         room_execution_policy: Optional[Dict[str, Any]] = None,
         forwarded_llm_jwt: Optional[str] = None) -> Any:
         """Create an AIAgent from the gateway runtime config + platform toolsets.
         ``gateway_session_key`` persists across transcripts (memory scope), unlike ``session_id``;
         ``route`` / ``session_model`` are mutually exclusive; ``confirmed_runtime_lock`` beats the
-        session ``/model`` override, disables the fallback chain and fails closed.
+        session ``/model`` override and fails closed. ``persisted_lock`` marks a lock replayed from
+        the session's stored ``browser_model_lock`` (resume) rather than a freshly confirmed one in
+        this request: it keeps the fallback chain available, so a locked model that has since been
+        removed/renamed on its provider can still recover automatically instead of hard-failing a
+        resumed session.
 
         When the matched route also sets ``forward_caller_jwt: true`` and ``forwarded_llm_jwt`` is
         set, the caller's JWT replaces ``api_key`` entirely for this agent's primary LLM client —
@@ -2502,8 +2507,12 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "reasoning_callback": reasoning_callback,
             "status_callback": status_callback,
             "session_db": self._ensure_session_db(),
-            # Same fallback provider chain as Telegram/Discord/Slack.
-            "fallback_model": None if confirmed_runtime_lock else GatewayRunner._load_fallback_model(),
+            # Same fallback provider chain as Telegram/Discord/Slack. A freshly confirmed lock
+            # fails closed (the user just chose this model); a persisted lock replayed on resume
+            # keeps the chain so a since-removed/renamed model can still recover (see docstring).
+            "fallback_model": (
+                None if (confirmed_runtime_lock and not persisted_lock)
+                else GatewayRunner._load_fallback_model()),
             "reasoning_config": request_reasoning_config,
             "gateway_session_key": gateway_session_key,
             # The session's provider from the previous request, so its queued recall reaches this turn
@@ -3490,7 +3499,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             gateway_session_key=gateway_session_key, route=route, session_model=session_model,
             requested_runtime=runtime_request.get("requested") or {},
             route_source=runtime_request.get("route_source") or "global",
-            confirmed_runtime_lock=lock_active, turn_author=turn_author,
+            confirmed_runtime_lock=lock_active,
+            persisted_lock=bool(runtime_request.get("persisted_lock")), turn_author=turn_author,
             # #98619: the client addresses this session by construction — the id is in the
             # request path (/api/sessions/{session_id}/chat) — so a wake self-post lands where
             # the client will read it. The audited native-session opt-in.
@@ -4211,9 +4221,12 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
     def _turn_runtime_metadata(
         self, agent: Any, *, route: Optional[Dict[str, Any]], requested_runtime: Optional[Dict[str, Any]],
-        route_source: str, confirmed_runtime_lock: bool) -> Dict[str, Any]:
+        route_source: str, confirmed_runtime_lock: bool, persisted_lock: bool = False) -> Dict[str, Any]:
         """Sanitized actual-vs-requested runtime for a finished turn; raises RuntimeError when a
-        confirmed model lock's provider/model differs from what the agent actually ran with."""
+        confirmed model lock's provider/model differs from what the agent actually ran with.
+        ``persisted_lock`` skips that check: the fallback chain is deliberately open for a lock
+        replayed from storage (see ``_create_agent``), so a provider/model mismatch there means
+        fallback recovered the turn, not that something is wrong."""
         runtime = dict(getattr(agent, "_hermes_api_runtime", {}) or {})
         raw_provider = getattr(agent, "provider", "")
         raw_model = getattr(agent, "model", "")
@@ -4227,7 +4240,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 runtime.setdefault(key, "")
         route = route or {}
         requested_runtime = requested_runtime or {}
-        if confirmed_runtime_lock:
+        if confirmed_runtime_lock and not persisted_lock:
             requested_provider = self._clean_runtime_id(
                 route.get("provider") or requested_runtime.get("provider"), max_len=80)
             # _create_agent records the provider after resolving the request through the
@@ -4254,7 +4267,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
     def _finish_turn_result(
         self, agent: Any, result: Any, session_id: Optional[str], *, route, requested_runtime, route_source,
-        confirmed_runtime_lock: bool) -> tuple:
+        confirmed_runtime_lock: bool, persisted_lock: bool = False) -> tuple:
         """Attach usage, effective session id, ``_compressed`` and runtime metadata to a finished turn."""
         usage = {"input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
                  "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
@@ -4272,7 +4285,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         if requested_runtime or route or confirmed_runtime_lock or (route_source and route_source != "global"):
             runtime = self._turn_runtime_metadata(
                 agent, route=route, requested_runtime=requested_runtime,
-                route_source=route_source, confirmed_runtime_lock=confirmed_runtime_lock)
+                route_source=route_source, confirmed_runtime_lock=confirmed_runtime_lock,
+                persisted_lock=persisted_lock)
             if isinstance(result, dict):
                 result["runtime"] = runtime
             usage["runtime"] = runtime
@@ -4288,7 +4302,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         requested_provider: Optional[str] = None, model_options: Optional[Dict[str, Any]] = None,
         route: Optional[Dict[str, Any]] = None, session_model: Optional[str] = None,
         requested_runtime: Optional[Dict[str, Any]] = None, route_source: str = "global",
-        confirmed_runtime_lock: bool = False, bind_declared_conversation: bool = False,
+        confirmed_runtime_lock: bool = False, persisted_lock: bool = False,
+        bind_declared_conversation: bool = False,
         session_history_delivery: str = "", turn_author: Optional[Dict[str, Any]] = None,
         relay_metadata: Optional[Dict[str, Any]] = None, notification_category: str = "result",
         resume_unanswered_turn: bool = False, approval_notify_callback=None,
@@ -4300,6 +4315,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         ``agent_ref[0]`` receives the agent so SSE writers can interrupt it; ``active_run_id``
         registers it in ``_active_run_agents``. Under a confirmed model lock the actual
         provider/model must match or the turn fails; ``runtime`` metadata is attached.
+        ``persisted_lock`` (see ``_create_agent``) relaxes both of those for a lock replayed
+        from storage on resume rather than freshly confirmed in this request.
         ``session_history_delivery`` declares #98619 session-id provenance and default-denies: only audited
         producers whose client can address the id again pass "1" (see
         ``_bind_api_server_session``).
@@ -4337,7 +4354,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                         gateway_session_key=gateway_session_key, requested_model=requested_model,
                         requested_provider=requested_provider, model_options=model_options, route=route,
                         session_model=session_model, confirmed_runtime_lock=confirmed_runtime_lock,
-                        forwarded_llm_jwt=forwarded_llm_jwt)
+                        persisted_lock=persisted_lock, forwarded_llm_jwt=forwarded_llm_jwt)
                     if agent_ref is not None:
                         agent_ref[0] = agent
                     if resume_unanswered_turn:
@@ -4393,7 +4410,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                                 reset_current_session_key(approval_token)
                     result, usage = self._finish_turn_result(
                         agent, result, session_id, route=route, requested_runtime=requested_runtime,
-                        route_source=route_source, confirmed_runtime_lock=confirmed_runtime_lock)
+                        route_source=route_source, confirmed_runtime_lock=confirmed_runtime_lock,
+                        persisted_lock=persisted_lock)
                     if muted and isinstance(result, dict):
                         # Project presentation only after finishing the source outcome. Keep
                         # the agent's result, transcript, failure flags and usage intact.
