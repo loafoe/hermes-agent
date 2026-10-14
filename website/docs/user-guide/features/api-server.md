@@ -677,9 +677,10 @@ A frontend proxying many human users through one Hermes deployment (e.g. a share
 dashboard) can declare which end user is actually chatting via `X-Hermes-User-Id` — any
 string identifier (email, username, etc.) is accepted, unvalidated. It threads through to
 `AIAgent(user_id=...)` — the same gateway-identity field every other platform (Telegram,
-Discord, ...) already populates from its own session source — so observability plugins such
-as the bundled Langfuse integration can attribute a turn's trace to the real end user instead
-of only the shared caller, enabling Langfuse's per-user usage/cost/feedback views. Purely
+Discord, ...) already populates from its own session source — and is passed as `user_id` on
+the `pre_api_request` plugin hook, so observability plugins (e.g. a Langfuse plugin that sets
+it on the trace) can attribute a turn to the real end user instead of only the shared caller,
+enabling Langfuse's per-user usage/cost/feedback views. Purely
 observability-facing: it grants nothing and is never used for authorization.
 
 ```bash
