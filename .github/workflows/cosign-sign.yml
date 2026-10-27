@@ -1,0 +1,67 @@
+name: Cosign sign a published image
+
+# Signs an already-built, already-pushed ghcr.io/loafoe/hermes-agent image
+# (base or overlay tag) using GitHub Actions' keyless OIDC identity via
+# Sigstore/Fulcio - no stored key, no interactive device-flow approval.
+# Deliberately decoupled from the build itself: the fork's multi-arch image
+# (Chromium/Node/Playwright staging) is built and pushed manually from a
+# dev machine per docs/.claude/skills/hermes-agent-fork-update, and the
+# pandoc/langfuse overlays are built in a separate repo on top of that - so
+# this workflow takes a full image reference as input rather than trying to
+# rebuild anything.
+#
+# Trigger manually after a build+push:
+#   gh workflow run cosign-sign.yml --ref main \
+#     -f image=ghcr.io/loafoe/hermes-agent:<tag>
+#
+# Verify afterwards:
+#   cosign verify ghcr.io/loafoe/hermes-agent:<tag> \
+#     --certificate-identity-regexp="https://github.com/loafoe/hermes-agent/.*" \
+#     --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: "Full image reference to sign (e.g. ghcr.io/loafoe/hermes-agent:v0.22.5-loafoe.2-mcp-jwt-forwarding-pandoc.1-langfuse.1)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write # required for cosign keyless signing
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Resolve exact digest
+        id: digest
+        run: |
+          set -euo pipefail
+          IMAGE="${{ inputs.image }}"
+          REPO="${IMAGE%%:*}"
+          DIGEST="$(docker buildx imagetools inspect "$IMAGE" | awk '/^Digest:/ {print $2; exit}')"
+          test -n "$DIGEST"
+          echo "ref=${REPO}@${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Sign image with cosign
+        run: cosign sign --yes "${{ steps.digest.outputs.ref }}"
+
+      - name: Verify signature
+        run: |
+          cosign verify "${{ steps.digest.outputs.ref }}" \
+            --certificate-identity-regexp="https://github.com/${{ github.repository }}/.*" \
+            --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
