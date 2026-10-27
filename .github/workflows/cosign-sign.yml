@@ -50,11 +50,21 @@ jobs:
       - name: Resolve exact digest
         id: digest
         run: |
-          set -euo pipefail
+          set -uo pipefail
           IMAGE="${{ inputs.image }}"
           REPO="${IMAGE%%:*}"
-          DIGEST="$(docker buildx imagetools inspect "$IMAGE" | awk '/^Digest:/ {print $2; exit}')"
-          test -n "$DIGEST"
+          OUT="$(docker buildx imagetools inspect "$IMAGE" 2>&1)"
+          STATUS=$?
+          echo "$OUT"
+          if [ "$STATUS" -ne 0 ]; then
+            echo "::error::docker buildx imagetools inspect failed with status $STATUS"
+            exit 1
+          fi
+          DIGEST="$(printf '%s\n' "$OUT" | awk '/^Digest:/ {print $2; exit}')"
+          if [ -z "$DIGEST" ]; then
+            echo "::error::could not parse digest from imagetools output"
+            exit 1
+          fi
           echo "ref=${REPO}@${DIGEST}" >> "$GITHUB_OUTPUT"
 
       - name: Sign image with cosign
