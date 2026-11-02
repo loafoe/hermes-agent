@@ -4288,16 +4288,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         as THIS turn's user message instead of being appended a second time
         (``agent.session_persistence.adopt_unanswered_turn``; #115325).
         ``caller_user_id`` (from ``X-Hermes-User-Id``) only labels the turn's agent/observability
-        attribution (e.g. a Langfuse ``user_id``). It grants nothing."""
-        # The durable session-authority admission queue (v0.22.1+) has no carrier for our
-        # fork-only forwarded_mcp_jwt/forwarded_llm_jwt/caller_user_id: execute_admission's
-        # generic drain (shared by every platform) never binds the MCP-JWT contextvar or an
-        # api-server-specific user_id/LLM-credential override. Skip the delegate branch for any
-        # turn that actually needs one of those — it keeps running the inline path below, exactly
-        # as before this sync — and only take the new durable path for turns that don't (parity
-        # with stock upstream behavior for everyone else).
-        if (getattr(self.gateway_runner, "session_authority", None) is not None
-                and not (forwarded_mcp_jwt or forwarded_llm_jwt or caller_user_id)):
+        attribution (e.g. a Langfuse ``user_id``). It grants nothing.
+        The three forwarded values reach a durable admission request-owned, never in its payload
+        (``gateway.session_api_forwarding``)."""
+        if getattr(self.gateway_runner, "session_authority", None) is not None:
             from gateway.session_api_turn import run_api_turn
             return await run_api_turn(self, user_message=user_message, conversation_history=conversation_history,
                 ephemeral_system_prompt=ephemeral_system_prompt, session_id=session_id,
@@ -4312,7 +4306,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 bind_declared_conversation=bind_declared_conversation, request_id=request_id, run_owner_scope=run_owner_scope,
                 history_from_session=history_from_session, session_history_delivery=session_history_delivery,
                 turn_author=turn_author, resume_unanswered_turn=resume_unanswered_turn, relay_metadata=relay_metadata,
-                approval_notify_callback=approval_notify_callback, approval_session_key=approval_session_key)
+                approval_notify_callback=approval_notify_callback, approval_session_key=approval_session_key,
+                forwarded_mcp_jwt=forwarded_mcp_jwt, forwarded_llm_jwt=forwarded_llm_jwt, caller_user_id=caller_user_id)
         loop = asyncio.get_running_loop()
         # ContextVars do not follow run_in_executor threads: capture here, re-enter in _run().
         request_profile = _api_request_profile.get()

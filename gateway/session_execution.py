@@ -18,6 +18,7 @@ from agent.replay_cleanup import strip_stale_dangerous_confirmations
 from gateway.config import Platform
 from gateway.media_repair import repair_explicit_computer_use_media_paths
 from gateway.platforms.base import BasePlatformAdapter
+from gateway.session_api_forwarding import executing_value
 from gateway.session_api_turn import api_runtime_locked
 from gateway.turn_context import TurnContext
 from hermes_cli.config import cfg_get
@@ -171,7 +172,7 @@ class GatewaySessionAgentMixin:
             provider_sort=pr.get("sort"), provider_require_parameters=pr.get("require_parameters", False),
             provider_data_collection=pr.get("data_collection"),
             session_id=ctx.session_id, platform=platform_key,
-            user_id=src.user_id, user_id_alt=src.user_id_alt, user_name=src.user_name,
+            user_id=executing_value('caller_user_id') or src.user_id, user_id_alt=src.user_id_alt, user_name=src.user_name,
             chat_id=src.chat_id, chat_name=src.chat_name, chat_type=src.chat_type, thread_id=src.thread_id,
             gateway_session_key=ctx.session_key,
             session_db=getattr(runner._session_db, "_db", runner._session_db),
@@ -197,7 +198,7 @@ class GatewaySessionAgentMixin:
         sig = runner._agent_config_signature(
             turn_route["model"], turn_route["runtime"], ctx.enabled_toolsets, combined_ephemeral,
             cache_keys=runner._extract_cache_busting_config(ctx.user_config),
-            user_id=getattr(ctx.source, "user_id", None),
+            user_id=executing_value('caller_user_id') or getattr(ctx.source, "user_id", None),
             user_id_alt=getattr(ctx.source, "user_id_alt", None),
             skip_context_files=skip_context_files,
         )

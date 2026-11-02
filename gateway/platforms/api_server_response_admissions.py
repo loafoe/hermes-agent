@@ -143,18 +143,20 @@ async def prepare_context(adapter, request, body, gateway_session_key, durable_k
                            forwarded_mcp_jwt=None, forwarded_llm_jwt=None):
     """Validate first-time requests; exact retries use the accepted payload and result only.
 
-    ``forwarded_mcp_jwt``/``forwarded_llm_jwt`` ride along in ``run_kwargs`` only for the direct
-    ``run_agent(**run_kwargs)`` call the caller makes with the returned context — they are not
-    part of ``_SETTING_KEYS`` and so are never persisted into a durable admission's payload."""
+    ``forwarded_mcp_jwt``/``forwarded_llm_jwt`` ride along in the returned ``run_kwargs`` to the
+    caller's ``run_agent(**run_kwargs)`` call, which holds them request-owned for the admission
+    (``gateway.session_api_forwarding``); they are never persisted into its payload."""
     import asyncio
     from gateway.platforms.api_server import (
         _auto_truncate_response_history, _content_has_visible_payload, _error_response)
     from gateway.platforms.api_server_openai_routes import _parse_responses_input, _parse_conversation_history
+    from gateway.session_api_forwarding import forwarded_kwargs
+    forwarded = forwarded_kwargs(forwarded_mcp_jwt=forwarded_mcp_jwt, forwarded_llm_jwt=forwarded_llm_jwt)
     request_id = f'responses:{scope}:{key}' if durable_key else None
     if durable_key:
         admitted = find_admission(adapter, durable_key, request_id)
         if admitted is not None:
-            return admitted_context(admitted, replay=True), None
+            return {**admitted_context(admitted, replay=True), 'run_kwargs': forwarded}, None
     previous = body.get('previous_response_id')
     if body.get('conversation'):
         previous = adapter._current_response_store().get_conversation(body['conversation'])
@@ -204,13 +206,9 @@ async def prepare_context(adapter, request, body, gateway_session_key, durable_k
     if stored_session_id and stored_session_id != chain_root:
         run_kwargs['walked_from'] = chain_root  # the chain moved past its swept stored session
     if durable_key:
-        # Known gap: an Idempotency-Key admission settles through the generic durable drain
-        # (admitted_context's run_kwargs={} / observe_api_turn), which has no carrier for
-        # forwarded_mcp_jwt/forwarded_llm_jwt at all — same as execute_admission's generic
-        # path. Not centcom's path (session-chat, not /v1/responses) and not a regression
-        # (Idempotency-Key admission is itself new in this sync); left unfixed.
-        return await _admit(adapter, durable_key, request_id, request_binding(adapter, request, durable_key),
-                            run_kwargs, body.get('model', adapter._model_name)), None
+        context = await _admit(adapter, durable_key, request_id, request_binding(adapter, request, durable_key),
+                               run_kwargs, body.get('model', adapter._model_name))
+        return {**context, 'run_kwargs': forwarded}, None
     if 'walked_from' in run_kwargs:
         await _bind_successor(adapter, session_id, run_kwargs)
     return dict(session_id=session_id, user_message=user_message, conversation_history=history,

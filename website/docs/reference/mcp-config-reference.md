@@ -481,6 +481,10 @@ MCP server for the duration of that agent turn. If the header is absent,
 no `Authorization` header is added (the server's own static `headers`
 config, if any, is still applied).
 
+The JWT stays in memory with the request that sent it and is never stored
+with the queued turn, so a turn the gateway recovers after a restart (its
+request is gone) runs without it.
+
 `auth: forward_jwt` is only valid on HTTP/SSE (`url`-based) servers, not
 stdio (`command`-based) servers, and cannot be combined with `auth: oauth`
 on the same entry — both are rejected at config save/load time.

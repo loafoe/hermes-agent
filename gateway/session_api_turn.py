@@ -10,6 +10,7 @@ import uuid
 
 from gateway.config import Platform
 from gateway.session_api import bind_api_steps, restore_api_session, run_steps, run_steps_off_loop
+from gateway.session_api_forwarding import executing_forwarded, hold_forwarded
 from gateway.session_results import admission_result
 from hermes_state_runtime import RuntimeStoreError, admit_session_input, _json
 
@@ -117,7 +118,8 @@ def api_session_vars():
     bound = current.get('browser_control') or {}
     return {'session_history_delivery': current['settings'].get('session_history_delivery') or '',
             'browser_control_principal': bound.get('principal', ''),
-            'browser_control_transport_family': bound.get('transport_family', '')}
+            'browser_control_transport_family': bound.get('transport_family', ''),
+            'mcp_jwt': current.get('forwarded', {}).get('forwarded_mcp_jwt') or ''}
 
 
 def check_api_settings(adapter, settings):
@@ -401,9 +403,10 @@ async def observe_api_turn(admitted, **kwargs):
     registered = observers.setdefault(row['admission_id'], [])
     registered.append(observer)
     try:
-        authority._publish_pending(ref)
-        authority._schedule(ref)
-        await asyncio.shield(waiter)
+        with hold_forwarded(authority, row['admission_id'], kwargs):
+            authority._publish_pending(ref)
+            authority._schedule(ref)
+            await asyncio.shield(waiter)
     except RuntimeStoreError as exc:
         # Retirement releases every observer with runtime_draining, the same reason a refused
         # request gets. This one's input is admitted: say so while the row is still queued.
@@ -483,7 +486,8 @@ def prepare_api_execution(authority, ref, payload):
             'content': content, 'turn_author': data.get('turn_author') if data else None,
             'relay_metadata': data.get('relay_metadata') if data else None,
             'resume_unanswered': bool(data and data.get('resume_unanswered')),
-            'browser_control': _rebind_browser_control(adapter, data)}
+            'browser_control': _rebind_browser_control(adapter, data),
+            'forwarded': executing_forwarded(authority, ref.session_id)}
 
 
 def _api_observers(authority, session_id):
@@ -602,5 +606,6 @@ def prepare_api_runtime(model, runtime_kwargs):
         requested_model=options.get('requested_model'), requested_provider=options.get('requested_provider'),
         route=route, session_model=options.get('session_model'),
         confirmed_runtime_lock=bool(options.get('confirmed_runtime_lock')),
-        gateway_session_key=None, session_id=None)
+        gateway_session_key=None, session_id=None,
+        forwarded_llm_jwt=current.get('forwarded', {}).get('forwarded_llm_jwt'))
     return model, runtime_kwargs
