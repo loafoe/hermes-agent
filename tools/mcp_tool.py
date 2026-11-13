@@ -514,7 +514,14 @@ _server_breaker_opened_at: dict[Any, float] = {}
 # True while every strike in the current streak was the tool's own error payload (server reachable,
 # call rejected); picks the open-breaker wording, since "unreachable" was false for that case (#11113).
 _server_errors_all_application: dict[Any, bool] = {}
-_CIRCUIT_BREAKER_THRESHOLD, _CIRCUIT_BREAKER_COOLDOWN_SEC = 3, 60.0
+# Threshold raised 3 -> 30: a real incident against a permission-denied-but-reachable MCP server
+# (Jira) tripped the breaker on the 3rd rejected call and then short-circuited every call to it
+# for the whole cooldown -- a self-inflicted denial of service against a server that was never
+# actually unreachable, just rejecting that particular call. 30 still catches a genuinely dead
+# server (the burn loop this breaker exists to stop, #10447 needs dozens of iterations, not 3-30)
+# while tolerating a short run of rejected/retried calls without taking the server down for
+# everyone. Applies to every MCP server uniformly; there is no per-server override.
+_CIRCUIT_BREAKER_THRESHOLD, _CIRCUIT_BREAKER_COOLDOWN_SEC = 30, 60.0
 
 # Trust-tier gating (``trust: full | untrusted``): on an untrusted server every write-capable
 # call (discovery-time ``readOnlyHint`` not exactly True; malformed fails closed) needs approval

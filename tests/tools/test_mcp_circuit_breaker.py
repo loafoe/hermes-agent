@@ -602,8 +602,8 @@ def test_breaker_opened_by_tool_errors_says_rejected_not_unreachable(monkeypatch
 
         mcp_tool._reset_server_error("srv")
         mcp_tool._bump_server_error("srv")                      # transport strike
-        mcp_tool._bump_server_error("srv", application=True)
-        mcp_tool._bump_server_error("srv", application=True)
+        for _ in range(mcp_tool._CIRCUIT_BREAKER_THRESHOLD - 1):
+            mcp_tool._bump_server_error("srv", application=True)
         assert "unreachable" in json.loads(handler({}))["error"].lower()
     finally:
         _cleanup(mcp_tool, "srv")
